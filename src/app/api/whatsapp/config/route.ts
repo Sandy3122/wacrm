@@ -138,9 +138,31 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json()
-    const { phone_number_id, waba_id, access_token, verify_token } = body
+    const {
+      phone_number_id,
+      waba_id,
+      access_token,
+      verify_token,
+      connection_type,
+      business_id,
+      display_phone_number,
+      pause_bot_on_app_reply,
+      bot_pause_duration_hours,
+      automation_outside_hours,
+      fallback_message,
+      app_sync_enabled,
+    } = body
 
-    if (!access_token || !phone_number_id) {
+    const { data: existingEarly } = await supabase
+      .from('whatsapp_config')
+      .select('id, phone_number_id, access_token')
+      .eq('user_id', user.id)
+      .maybeSingle()
+
+    const settingsOnlyUpdate =
+      existingEarly && !access_token && phone_number_id === existingEarly.phone_number_id
+
+    if (!settingsOnlyUpdate && (!access_token || !phone_number_id)) {
       return NextResponse.json(
         { error: 'access_token and phone_number_id are required' },
         { status: 400 }
@@ -177,28 +199,50 @@ export async function POST(request: Request) {
       )
     }
 
-    // Verify credentials with Meta BEFORE saving
-    let phoneInfo
-    try {
-      phoneInfo = await verifyPhoneNumber({
-        phoneNumberId: phone_number_id,
-        accessToken: access_token,
-      })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown Meta API error'
-      console.error('Meta API verification failed during save:', message)
-      return NextResponse.json(
-        { error: `Meta API error: ${message}` },
-        { status: 400 }
-      )
+    let phoneInfo: Awaited<ReturnType<typeof verifyPhoneNumber>> | undefined
+
+    if (settingsOnlyUpdate) {
+      let storedToken: string
+      try {
+        storedToken = decrypt(existingEarly!.access_token)
+      } catch {
+        return NextResponse.json(
+          { error: 'Stored token cannot be decrypted. Re-enter access token.' },
+          { status: 400 },
+        )
+      }
+      try {
+        phoneInfo = await verifyPhoneNumber({
+          phoneNumberId: phone_number_id,
+          accessToken: storedToken,
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown Meta API error'
+        return NextResponse.json({ error: `Meta API error: ${message}` }, { status: 400 })
+      }
+    } else {
+      try {
+        phoneInfo = await verifyPhoneNumber({
+          phoneNumberId: phone_number_id,
+          accessToken: access_token,
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown Meta API error'
+        console.error('Meta API verification failed during save:', message)
+        return NextResponse.json(
+          { error: `Meta API error: ${message}` },
+          { status: 400 }
+        )
+      }
     }
 
-    // Encrypt sensitive tokens before storing
     let encryptedAccessToken: string
-    let encryptedVerifyToken: string | null
+    let encryptedVerifyToken: string | null | undefined
     try {
-      encryptedAccessToken = encrypt(access_token)
-      encryptedVerifyToken = verify_token ? encrypt(verify_token) : null
+      encryptedAccessToken = settingsOnlyUpdate
+        ? existingEarly!.access_token
+        : encrypt(access_token)
+      encryptedVerifyToken = verify_token ? encrypt(verify_token) : settingsOnlyUpdate ? undefined : null
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown encryption error'
       console.error('Encryption failed:', message)
@@ -218,18 +262,47 @@ export async function POST(request: Request) {
       .eq('user_id', user.id)
       .maybeSingle()
 
+    const coexistenceFields: Record<string, unknown> = {}
+    if (connection_type === 'legacy' || connection_type === 'coexistence') {
+      coexistenceFields.connection_type = connection_type
+    }
+    if (business_id !== undefined) coexistenceFields.business_id = business_id || null
+    if (display_phone_number !== undefined) {
+      coexistenceFields.display_phone_number = display_phone_number || null
+    }
+    if (pause_bot_on_app_reply !== undefined) {
+      coexistenceFields.pause_bot_on_app_reply = Boolean(pause_bot_on_app_reply)
+    }
+    if (bot_pause_duration_hours !== undefined) {
+      coexistenceFields.bot_pause_duration_hours = Number(bot_pause_duration_hours) || 24
+    }
+    if (automation_outside_hours !== undefined) {
+      coexistenceFields.automation_outside_hours = Boolean(automation_outside_hours)
+    }
+    if (fallback_message !== undefined) {
+      coexistenceFields.fallback_message = fallback_message || null
+    }
+    if (app_sync_enabled !== undefined) {
+      coexistenceFields.app_sync_enabled = Boolean(app_sync_enabled)
+    }
+
     if (existing) {
+      const updatePayload: Record<string, unknown> = {
+        phone_number_id,
+        waba_id: waba_id || null,
+        access_token: encryptedAccessToken,
+        status: 'connected',
+        connected_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...coexistenceFields,
+      }
+      if (encryptedVerifyToken !== undefined) {
+        updatePayload.verify_token = encryptedVerifyToken
+      }
+
       const { error: updateError } = await supabase
         .from('whatsapp_config')
-        .update({
-          phone_number_id,
-          waba_id: waba_id || null,
-          access_token: encryptedAccessToken,
-          verify_token: encryptedVerifyToken,
-          status: 'connected',
-          connected_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
+        .update(updatePayload)
         .eq('user_id', user.id)
 
       if (updateError) {
@@ -249,7 +322,9 @@ export async function POST(request: Request) {
           access_token: encryptedAccessToken,
           verify_token: encryptedVerifyToken,
           status: 'connected',
+          connection_type: connection_type === 'coexistence' ? 'coexistence' : 'legacy',
           connected_at: new Date().toISOString(),
+          ...coexistenceFields,
         })
 
       if (insertError) {

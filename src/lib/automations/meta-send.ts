@@ -147,6 +147,8 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     template_name,
     message_id: waMessageId,
     status: 'sent',
+    message_source: input.kind === 'template' ? 'template' : 'api',
+    direction: 'outbound',
   })
   if (msgErr) {
     // Meta already has the message; record the DB error but don't pretend
@@ -160,6 +162,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
       last_message_text:
         input.kind === 'template' ? `[template:${input.templateName}]` : input.text,
       last_message_at: new Date().toISOString(),
+      last_message_source: 'api',
       updated_at: new Date().toISOString(),
     })
     .eq('id', input.conversationId)

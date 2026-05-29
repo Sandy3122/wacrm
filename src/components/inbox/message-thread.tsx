@@ -64,6 +64,13 @@ interface MessageThreadProps {
     conversationId: string,
     assignedAgentId: string | null,
   ) => void;
+  onBotStatusChange?: (
+    conversationId: string,
+    updates: {
+      bot_status?: Conversation["bot_status"];
+      bot_paused_until?: string | null;
+    },
+  ) => void;
   /**
    * On mobile, the thread is shown full-screen with the conversation list
    * hidden. This callback lets the page deselect the active conversation
@@ -140,6 +147,7 @@ export function MessageThread({
   onUpdateMessage,
   onStatusChange,
   onAssignChange,
+  onBotStatusChange,
   onBack,
   resyncToken = 0,
   onRefresh,
@@ -652,6 +660,32 @@ export function MessageThread({
     [conversation, user?.id],
   );
 
+  const handleBotAction = useCallback(
+    async (action: "pause" | "resume") => {
+      if (!conversation) return;
+      try {
+        const res = await fetch(`/api/conversations/${conversation.id}/bot`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, hours: 24 }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          toast.error(data.error || "Failed to update bot status");
+          return;
+        }
+        onBotStatusChange?.(conversation.id, {
+          bot_status: data.bot_status,
+          bot_paused_until: data.bot_paused_until,
+        });
+        toast.success(action === "resume" ? "Bot resumed" : "Bot paused");
+      } catch {
+        toast.error("Failed to update bot status");
+      }
+    },
+    [conversation, onBotStatusChange],
+  );
+
   const handleAssignChange = useCallback(
     async (agentId: string | null) => {
       if (!conversation) return;
@@ -703,6 +737,15 @@ export function MessageThread({
     ? (currentAssignee?.full_name ?? "Assigned")
     : "Assign";
 
+  const botStatus = conversation.bot_status ?? "active";
+  const botPausedUntil = conversation.bot_paused_until
+    ? new Date(conversation.bot_paused_until)
+    : null;
+  const botPausedActive =
+    botStatus === "paused" &&
+    botPausedUntil &&
+    botPausedUntil.getTime() > Date.now();
+
   return (
     <div className={cn("flex flex-1 flex-col", DOODLE_BG_CLASSES)}>
       {/* Header — solid bg-slate-900 sits on top of the doodle so the
@@ -740,9 +783,45 @@ export function MessageThread({
             <Clock className="h-3 w-3" />
             {sessionInfo.remaining}
           </Badge>
+          {assignedAgentId && (
+            <Badge variant="outline" className="hidden border-amber-700 text-amber-300 text-[10px] sm:inline-flex">
+              Human assigned
+            </Badge>
+          )}
+          {botPausedActive && (
+            <Badge variant="outline" className="hidden border-orange-700 text-orange-300 text-[10px] sm:inline-flex">
+              Bot paused
+              {botPausedUntil
+                ? ` until ${format(botPausedUntil, "MMM d HH:mm")}`
+                : ""}
+            </Badge>
+          )}
+          {botStatus === "active" && !assignedAgentId && (
+            <Badge variant="outline" className="hidden border-emerald-800 text-emerald-400 text-[10px] sm:inline-flex">
+              Bot active
+            </Badge>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
+          {botPausedActive && (
+            <button
+              type="button"
+              onClick={() => handleBotAction("resume")}
+              className="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:bg-slate-800 hover:text-white"
+            >
+              Resume bot
+            </button>
+          )}
+          {botStatus === "active" && !botPausedActive && (
+            <button
+              type="button"
+              onClick={() => handleBotAction("pause")}
+              className="hidden rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:bg-slate-800 hover:text-white sm:inline-block"
+            >
+              Pause bot
+            </button>
+          )}
           {/* Manual refresh — forces a refetch of the messages + the
               conversation list (the parent bumps its resyncToken). Useful
               when realtime missed an event or the agent just wants to be

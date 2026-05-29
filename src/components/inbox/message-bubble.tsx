@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
-import type { Message, MessageReaction } from "@/types";
+import type { Message, MessageReaction, MessageSource } from "@/types";
 import {
   Clock,
   Check,
@@ -25,6 +25,21 @@ interface MessageBubbleProps {
   reactions?: MessageReaction[];
   currentUserId?: string;
   onToggleReaction?: (emoji: string) => void;
+}
+
+function sourceLabel(source?: MessageSource): string | null {
+  switch (source) {
+    case "customer":
+      return "Customer";
+    case "api":
+      return "API";
+    case "business_app":
+      return "WhatsApp Business App";
+    case "template":
+      return "Template";
+    default:
+      return null;
+  }
 }
 
 function StatusIcon({ status }: { status: Message["status"] }) {
@@ -250,6 +265,7 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const isAgent = message.sender_type === "agent" || message.sender_type === "bot";
   const time = format(new Date(message.created_at), "HH:mm");
+  const source = sourceLabel(message.message_source);
 
   // Row alignment + width cap are owned by <MessageActions> so its hover
   // group matches the bubble's content area, not the full row.
@@ -274,10 +290,15 @@ export function MessageBubble({
         <MessageContent message={message} />
         <div
           className={cn(
-            "mt-1 flex items-center gap-1",
+            "mt-1 flex flex-wrap items-center gap-1",
             isAgent ? "justify-end" : "justify-start",
           )}
         >
+          {source && (
+            <span className="text-[9px] uppercase tracking-wide text-white/50">
+              {source}
+            </span>
+          )}
           <span className="text-[10px] text-white/60">{time}</span>
           {isAgent && <StatusIcon status={message.status} />}
         </div>

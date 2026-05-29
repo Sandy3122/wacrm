@@ -2,10 +2,26 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
-import { normalizePhone, phonesMatch } from '@/lib/whatsapp/phone-utils'
+import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
+import { shouldRunAutomation } from '@/lib/whatsapp/bot-gate'
+import {
+  getWhatsAppConfigForPhoneNumberId,
+  logWebhookEvent,
+  touchLastWebhookAt,
+} from '@/lib/whatsapp/config-resolver'
+import { processBusinessAppEcho } from '@/lib/whatsapp/webhook-echo'
+import {
+  processHistorySync,
+  processSmbAppStateSync,
+} from '@/lib/whatsapp/webhook-history'
+import {
+  findOrCreateContact,
+  findOrCreateConversation,
+  resumeBotIfPauseExpired,
+} from '@/lib/whatsapp/webhook-contact'
 
 // Lazy-initialized to avoid build-time crash when env vars are missing
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -48,6 +64,20 @@ interface WhatsAppMessage {
   context?: { id: string }
 }
 
+interface MessageEchoPayload {
+  id: string
+  from: string
+  to: string
+  timestamp: string
+  type: string
+  text?: { body: string }
+  image?: { id: string; caption?: string }
+  video?: { id: string; caption?: string }
+  document?: { id: string; filename?: string; caption?: string }
+  audio?: { id: string }
+  location?: { latitude: number; longitude: number; name?: string; address?: string }
+}
+
 interface WhatsAppWebhookEntry {
   id: string
   changes: Array<{
@@ -62,12 +92,15 @@ interface WhatsAppWebhookEntry {
         wa_id: string
       }>
       messages?: WhatsAppMessage[]
+      message_echoes?: MessageEchoPayload[]
       statuses?: Array<{
         id: string
         status: string
         timestamp: string
         recipient_id: string
       }>
+      history?: Array<{ messages?: unknown[] }>
+      state_sync?: Array<{ type?: string; contact?: { phone_number?: string } }>
     }
     field: string
   }>
@@ -119,8 +152,6 @@ export async function GET(request: Request) {
     }
 
     if (matchedConfig) {
-      // Fire-and-forget GCM upgrade. Safe to run on every subscribe
-      // since it's a no-op once the column is already GCM.
       if (isLegacyFormat(matchedConfig.verify_token)) {
         void supabaseAdmin()
           .from('whatsapp_config')
@@ -135,7 +166,10 @@ export async function GET(request: Request) {
             }
           })
       }
-      // Return challenge as plain text
+      void supabaseAdmin()
+        .from('whatsapp_config')
+        .update({ webhook_status: 'verified' })
+        .eq('id', matchedConfig.id)
       return new Response(challenge, {
         status: 200,
         headers: { 'Content-Type': 'text/plain' },
@@ -191,57 +225,65 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   for (const entry of body.entry) {
     for (const change of entry.changes) {
       const value = change.value
+      const field = change.field
+      const phoneNumberId = value.metadata?.phone_number_id
 
-      // Handle status updates
       if (value.statuses) {
         for (const status of value.statuses) {
           await handleStatusUpdate(status)
         }
       }
 
-      // Handle incoming messages
-      if (!value.messages || !value.contacts) continue
+      if (!phoneNumberId) continue
 
-      const phoneNumberId = value.metadata.phone_number_id
-
-      // Find user's config by phone_number_id. `.single()` returns
-      // PGRST116 for both 0 rows AND ≥2 rows — distinguish them so
-      // operators see the real cause in logs. ≥2 rows shouldn't happen
-      // post-migration 013 (UNIQUE constraint), but a row created
-      // before the constraint, or a race, would still surface here.
-      const { data: configRows, error: configError } = await supabaseAdmin()
-        .from('whatsapp_config')
-        .select('*')
-        .eq('phone_number_id', phoneNumberId)
-
-      if (configError) {
-        console.error(
-          'Error fetching whatsapp_config for phone_number_id:',
-          phoneNumberId,
-          configError
-        )
-        continue
-      }
-
-      if (!configRows || configRows.length === 0) {
+      const resolved = await getWhatsAppConfigForPhoneNumberId(phoneNumberId)
+      if (!resolved) {
         console.error('No config found for phone_number_id:', phoneNumberId)
         continue
       }
 
-      if (configRows.length > 1) {
-        console.error(
-          `Multiple configs (${configRows.length}) found for phone_number_id:`,
-          phoneNumberId,
-          '— inbound message dropped. Resolve duplicates so each number maps to a single user.',
-          'Owners:',
-          configRows.map((r: { user_id: string }) => r.user_id)
-        )
+      const { config, accessToken: decryptedAccessToken } = resolved
+      void touchLastWebhookAt(config.id)
+      void logWebhookEvent({
+        userId: config.user_id,
+        phoneNumberId,
+        field,
+        payload: value,
+      })
+
+      if (field === 'smb_message_echoes' || field === 'message_echoes') {
+        const echoes = value.message_echoes
+        if (echoes?.length) {
+          await processBusinessAppEcho({
+            echoes,
+            config,
+            rawChangeValue: value,
+          })
+        }
         continue
       }
 
-      const config = configRows[0]
+      if (field === 'history') {
+        await processHistorySync({
+          value: value as Parameters<typeof processHistorySync>[0]['value'],
+          config,
+        })
+        continue
+      }
 
-      const decryptedAccessToken = decrypt(config.access_token)
+      if (field === 'smb_app_state_sync') {
+        await processSmbAppStateSync({
+          value: value as Parameters<typeof processSmbAppStateSync>[0]['value'],
+          config,
+        })
+        continue
+      }
+
+      if (field !== 'messages' && !value.messages) {
+        continue
+      }
+
+      if (!value.messages || !value.contacts) continue
 
       for (let i = 0; i < value.messages.length; i++) {
         const message = value.messages[i]
@@ -251,7 +293,7 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
           message,
           contact,
           config.user_id,
-          decryptedAccessToken
+          decryptedAccessToken,
         )
       }
     }
@@ -496,6 +538,16 @@ async function processMessage(
   )
   if (!conversation) return
 
+  await resumeBotIfPauseExpired(conversation.id)
+
+  const { data: convState } = await supabaseAdmin()
+    .from('conversations')
+    .select('bot_status, bot_paused_until, assigned_agent_id')
+    .eq('id', conversation.id)
+    .maybeSingle()
+
+  const runAutomation = shouldRunAutomation(convState ?? conversation)
+
   // Reactions short-circuit here — they aren't messages. We never insert
   // into `messages`, never bump unread_count, never update last_message_text.
   // Done before parseMessageContent so the media-URL fetch is skipped.
@@ -567,25 +619,26 @@ async function processMessage(
     media_url: mediaUrl,
     message_id: message.id,
     status: 'delivered',
+    message_source: 'customer',
+    direction: 'inbound',
+    raw_payload: message,
     created_at: new Date(parseInt(message.timestamp) * 1000).toISOString(),
     reply_to_message_id: replyToInternalId,
-    // Only populated for content_type='interactive'. Migration 010 added
-    // the column; null for every other content_type so existing inserts
-    // behave identically.
     interactive_reply_id: interactiveReplyId,
   })
 
   if (msgError) {
+    if (msgError.code === '23505') return
     console.error('Error inserting message:', msgError)
     return
   }
 
-  // Update conversation
   const { error: convError } = await supabaseAdmin()
     .from('conversations')
     .update({
       last_message_text: contentText || `[${message.type}]`,
       last_message_at: new Date().toISOString(),
+      last_message_source: 'customer',
       unread_count: (conversation.unread_count || 0) + 1,
       updated_at: new Date().toISOString(),
     })
@@ -600,25 +653,10 @@ async function processMessage(
   // trigger installed in migration 003).
   await flagBroadcastReplyIfAny(userId, contactRecord.id)
 
-  // ============================================================
-  // Flow runner dispatch.
-  //
-  // If the runner consumes the message (it either advanced an active
-  // run or started a new one), we suppress the `new_message_received`
-  // + `keyword_match` automation triggers for this inbound. Customer
-  // is navigating the bot menu, not sending a fresh trigger word
-  // that should fork into automations.
-  //
-  // The relationship-level triggers (`new_contact_created`,
-  // `first_inbound_message`) still fire even when consumed — those
-  // are about WHO is messaging, not what they said.
-  //
-  // Awaited (not fire-and-forget) because we need the `consumed`
-  // result before deciding whether to dispatch automations. The
-  // runner has its own try/catch and never throws. Accounts with
-  // no active flows take the runner's early-exit "no_match" path
-  // basically for free (one indexed SELECT for the active run).
-  // ============================================================
+  if (!runAutomation) {
+    return
+  }
+
   const flowResult = await dispatchInboundToFlows({
     userId,
     contactId: contactRecord.id,
@@ -823,92 +861,3 @@ async function parseMessageContent(
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ContactRow = any
-
-interface ContactOutcome {
-  contact: ContactRow
-  /** True when this call created the row; drives new_contact_created
-   *  automation dispatch in processMessage. */
-  wasCreated: boolean
-}
-
-async function findOrCreateContact(
-  userId: string,
-  phone: string,
-  name: string
-): Promise<ContactOutcome | null> {
-  // Look up existing contacts for this user
-  const { data: contacts, error: contactsError } = await supabaseAdmin()
-    .from('contacts')
-    .select('*')
-    .eq('user_id', userId)
-
-  if (contactsError) {
-    console.error('Error fetching contacts:', contactsError)
-    return null
-  }
-
-  // Use phonesMatch for flexible matching
-  const existingContact = contacts?.find((c: ContactRow) => phonesMatch(c.phone, phone))
-
-  if (existingContact) {
-    // Update name if it changed
-    if (name && name !== existingContact.name) {
-      await supabaseAdmin()
-        .from('contacts')
-        .update({ name, updated_at: new Date().toISOString() })
-        .eq('id', existingContact.id)
-    }
-    return { contact: existingContact, wasCreated: false }
-  }
-
-  // Create new contact
-  const { data: newContact, error: createError } = await supabaseAdmin()
-    .from('contacts')
-    .insert({
-      user_id: userId,
-      phone,
-      name: name || phone,
-    })
-    .select()
-    .single()
-
-  if (createError) {
-    console.error('Error creating contact:', createError)
-    return null
-  }
-
-  return { contact: newContact, wasCreated: true }
-}
-
-async function findOrCreateConversation(userId: string, contactId: string) {
-  // Look for existing conversation
-  const { data: existing, error: findError } = await supabaseAdmin()
-    .from('conversations')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('contact_id', contactId)
-    .single()
-
-  if (!findError && existing) {
-    return existing
-  }
-
-  // Create new conversation
-  const { data: newConv, error: createError } = await supabaseAdmin()
-    .from('conversations')
-    .insert({
-      user_id: userId,
-      contact_id: contactId,
-    })
-    .select()
-    .single()
-
-  if (createError) {
-    console.error('Error creating conversation:', createError)
-    return null
-  }
-
-  return newConv
-}

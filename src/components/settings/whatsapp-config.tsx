@@ -27,7 +27,9 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from '@/components/ui/accordion';
-import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
+import type { WhatsAppConfig as WhatsAppConfigType, WhatsAppConnectionType } from '@/types';
+import { useEmbeddedSignup } from '@/hooks/use-embedded-signup';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 
 const MASKED_TOKEN = '••••••••••••••••';
 
@@ -53,6 +55,17 @@ export function WhatsAppConfig() {
   const [accessToken, setAccessToken] = useState('');
   const [verifyToken, setVerifyToken] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
+  const [connectionType, setConnectionType] = useState<WhatsAppConnectionType>('legacy');
+  const [displayPhoneNumber, setDisplayPhoneNumber] = useState('');
+  const [pauseBotOnAppReply, setPauseBotOnAppReply] = useState(true);
+  const [botPauseHours, setBotPauseHours] = useState(24);
+  const [automationOutsideHours, setAutomationOutsideHours] = useState(false);
+  const [fallbackMessage, setFallbackMessage] = useState('');
+  const [appSyncEnabled, setAppSyncEnabled] = useState(true);
+  const [webhookStatus, setWebhookStatus] = useState<string>('pending');
+  const [connectingSignup, setConnectingSignup] = useState(false);
+
+  const { launchEmbeddedSignup, canLaunch } = useEmbeddedSignup();
 
   const webhookUrl =
     typeof window !== 'undefined'
@@ -80,6 +93,14 @@ export function WhatsAppConfig() {
         setAccessToken(MASKED_TOKEN);
         setVerifyToken('');
         setTokenEdited(false);
+        setConnectionType(data.connection_type ?? 'legacy');
+        setDisplayPhoneNumber(data.display_phone_number || '');
+        setPauseBotOnAppReply(data.pause_bot_on_app_reply ?? true);
+        setBotPauseHours(data.bot_pause_duration_hours ?? 24);
+        setAutomationOutsideHours(data.automation_outside_hours ?? false);
+        setFallbackMessage(data.fallback_message || '');
+        setAppSyncEnabled(data.app_sync_enabled ?? true);
+        setWebhookStatus(data.webhook_status || 'pending');
       } else {
         setConfig(null);
         setPhoneNumberId('');
@@ -151,16 +172,19 @@ export function WhatsAppConfig() {
         phone_number_id: phoneNumberId.trim(),
         waba_id: wabaId.trim() || null,
         verify_token: verifyToken.trim() || null,
+        connection_type: connectionType,
+        display_phone_number: displayPhoneNumber.trim() || null,
+        pause_bot_on_app_reply: pauseBotOnAppReply,
+        bot_pause_duration_hours: botPauseHours,
+        automation_outside_hours: automationOutsideHours,
+        fallback_message: fallbackMessage.trim() || null,
+        app_sync_enabled: appSyncEnabled,
       };
 
       if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
         payload.access_token = accessToken.trim();
-      } else if (config) {
-        // Existing config — reuse stored encrypted token by decrypting on the
-        // server. But our POST handler requires an access_token to verify
-        // with Meta. If the user didn't change the token, we need to signal
-        // that. Simplest: require token re-entry if they're updating.
-        toast.error('Please re-enter the Access Token to save changes');
+      } else if (!config) {
+        toast.error('Access Token is required for initial setup');
         setSaving(false);
         return;
       }
@@ -262,6 +286,40 @@ export function WhatsAppConfig() {
     toast.success('Webhook URL copied to clipboard');
   }
 
+  async function handleConnectCoexistence() {
+    try {
+      setConnectingSignup(true);
+      const { code, session } = await launchEmbeddedSignup();
+      const res = await fetch('/api/whatsapp/embedded-signup/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code,
+          waba_id: session.waba_id,
+          phone_number_id: session.phone_number_id,
+          business_id: session.business_id,
+          display_phone_number: session.display_phone_number,
+          event: session.event,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Embedded Signup failed');
+        return;
+      }
+      toast.success('WhatsApp Business App connected via Coexistence');
+      if (data.verify_token) {
+        setVerifyToken(data.verify_token);
+      }
+      if (user) await fetchConfig(user.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Embedded Signup failed';
+      toast.error(message);
+    } finally {
+      setConnectingSignup(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -331,15 +389,110 @@ export function WhatsAppConfig() {
           </AlertDescription>
         </Alert>
 
-        {/* API Credentials */}
+        {/* Connection type */}
         <Card className="bg-slate-900 border-slate-700 ring-0 ring-transparent">
           <CardHeader>
-            <CardTitle className="text-white">API Credentials</CardTitle>
+            <CardTitle className="text-white">Connection Type</CardTitle>
             <CardDescription className="text-slate-400">
-              Enter your Meta WhatsApp Business API credentials.
+              Legacy uses manual Cloud API credentials. Coexistence keeps the WhatsApp Business App active on the same number.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <RadioGroup
+              value={connectionType}
+              onValueChange={(v) => setConnectionType(v as WhatsAppConnectionType)}
+              className="space-y-3"
+            >
+              <div className="flex items-start gap-3 rounded-lg border border-slate-700 p-3">
+                <RadioGroupItem value="legacy" id="conn-legacy" className="mt-1" />
+                <Label htmlFor="conn-legacy" className="cursor-pointer text-slate-200">
+                  <span className="font-medium">Legacy Cloud API</span>
+                  <p className="text-xs text-slate-500 mt-1 font-normal">
+                    Paste Phone Number ID, WABA ID, and token from Meta Developer Console.
+                  </p>
+                </Label>
+              </div>
+              <div className="flex items-start gap-3 rounded-lg border border-slate-700 p-3">
+                <RadioGroupItem value="coexistence" id="conn-coexistence" className="mt-1" />
+                <Label htmlFor="conn-coexistence" className="cursor-pointer text-slate-200">
+                  <span className="font-medium">Coexistence — WhatsApp Business App + API</span>
+                  <p className="text-xs text-slate-500 mt-1 font-normal">
+                    Connect an existing Business App number. Do not delete the app or migrate the number manually.
+                  </p>
+                </Label>
+              </div>
+            </RadioGroup>
+
+            {connectionType === 'coexistence' && (
+              <Alert className="bg-blue-950/30 border-blue-800/50">
+                <AlertDescription className="text-blue-100/90 text-sm space-y-2">
+                  <p>Keep WhatsApp Business App installed (v2.24.17+). Do not delete it.</p>
+                  <p>Choose <strong>Connect WhatsApp Business App</strong> in Meta&apos;s flow, not standard migration.</p>
+                  {canLaunch ? (
+                    <Button
+                      type="button"
+                      onClick={handleConnectCoexistence}
+                      disabled={connectingSignup}
+                      className="mt-2 bg-primary hover:bg-primary/90"
+                    >
+                      {connectingSignup ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin" />
+                          Connecting...
+                        </>
+                      ) : (
+                        'Connect WhatsApp Business App Number'
+                      )}
+                    </Button>
+                  ) : (
+                    <p className="text-amber-200/90 text-xs">
+                      Embedded Signup requires NEXT_PUBLIC_META_APP_ID and NEXT_PUBLIC_META_EMBEDDED_SIGNUP_CONFIG_ID.
+                      You can still import credentials below after onboarding via a BSP.
+                    </p>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {config && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">
+                  Type: {connectionType === 'coexistence' ? 'Coexistence' : 'Legacy'}
+                </span>
+                <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">
+                  Webhook: {webhookStatus}
+                </span>
+                <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">
+                  App sync: {appSyncEnabled ? 'On' : 'Off'}
+                </span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* API Credentials */}
+        <Card className="bg-slate-900 border-slate-700 ring-0 ring-transparent">
+          <CardHeader>
+            <CardTitle className="text-white">
+              {connectionType === 'coexistence' ? 'Credentials (after onboarding)' : 'API Credentials'}
+            </CardTitle>
+            <CardDescription className="text-slate-400">
+              {connectionType === 'coexistence'
+                ? 'Filled automatically after Embedded Signup, or paste BSP-provided values.'
+                : 'Enter your Meta WhatsApp Business API credentials.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-slate-300">Display Phone Number</Label>
+              <Input
+                placeholder="e.g. +1 555 0100"
+                value={displayPhoneNumber}
+                onChange={(e) => setDisplayPhoneNumber(e.target.value)}
+                className="bg-slate-800 border-slate-700 text-white placeholder:text-slate-500"
+              />
+            </div>
+
             <div className="space-y-2">
               <Label className="text-slate-300">Phone Number ID</Label>
               <Input
@@ -408,6 +561,66 @@ export function WhatsAppConfig() {
             </div>
           </CardContent>
         </Card>
+
+        {connectionType === 'coexistence' && (
+          <Card className="bg-slate-900 border-slate-700 ring-0 ring-transparent">
+            <CardHeader>
+              <CardTitle className="text-white">Coexistence Settings</CardTitle>
+              <CardDescription className="text-slate-400">
+                Control how WACRM reacts when staff reply from the WhatsApp Business App.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={pauseBotOnAppReply}
+                  onChange={(e) => setPauseBotOnAppReply(e.target.checked)}
+                  className="rounded border-slate-600"
+                />
+                Pause bot when human replies from Business App
+              </label>
+              <div className="space-y-2">
+                <Label className="text-slate-300">Pause duration (hours)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={168}
+                  value={botPauseHours}
+                  onChange={(e) => setBotPauseHours(Number(e.target.value) || 24)}
+                  className="bg-slate-800 border-slate-700 text-white w-24"
+                />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={automationOutsideHours}
+                  onChange={(e) => setAutomationOutsideHours(e.target.checked)}
+                  className="rounded border-slate-600"
+                />
+                Allow automation outside business hours (Mon–Fri 9–18 server time when off)
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={appSyncEnabled}
+                  onChange={(e) => setAppSyncEnabled(e.target.checked)}
+                  className="rounded border-slate-600"
+                />
+                App sync enabled
+              </label>
+              <div className="space-y-2">
+                <Label className="text-slate-300">Default fallback message</Label>
+                <Input
+                  placeholder="Optional message when bot cannot reply"
+                  value={fallbackMessage}
+                  onChange={(e) => setFallbackMessage(e.target.value)}
+                  className="bg-slate-800 border-slate-700 text-white placeholder:text-slate-500"
+                />
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Webhook URL */}
         <Card className="bg-slate-900 border-slate-700 ring-0 ring-transparent">

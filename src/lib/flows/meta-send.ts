@@ -118,6 +118,8 @@ export async function engineSendText(
     content_text: args.text,
     message_id: waMessageId,
     status: 'sent',
+    message_source: 'api',
+    direction: 'outbound',
   })
   if (msgErr) {
     throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
@@ -128,6 +130,7 @@ export async function engineSendText(
     .update({
       last_message_text: args.text,
       last_message_at: new Date().toISOString(),
+      last_message_source: 'api',
       updated_at: new Date().toISOString(),
     })
     .eq('id', args.conversationId)
@@ -290,6 +293,8 @@ async function sendInteractiveViaMeta(
     content_text: input.bodyText,
     message_id: waMessageId,
     status: 'sent',
+    message_source: 'api',
+    direction: 'outbound',
   })
   if (msgErr) {
     throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
@@ -300,6 +305,7 @@ async function sendInteractiveViaMeta(
     .update({
       last_message_text: input.bodyText,
       last_message_at: new Date().toISOString(),
+      last_message_source: 'api',
       updated_at: new Date().toISOString(),
     })
     .eq('id', input.conversationId)

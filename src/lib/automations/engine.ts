@@ -16,6 +16,8 @@ import type {
 } from '@/types'
 import { supabaseAdmin } from './admin-client'
 import { engineSendText, engineSendTemplate } from './meta-send'
+import { shouldRunAutomation } from '@/lib/whatsapp/bot-gate'
+import { isAutomationAllowedNow } from '@/lib/whatsapp/business-hours'
 
 // ------------------------------------------------------------
 // Public API
@@ -50,6 +52,23 @@ export interface DispatchInput {
  */
 export async function runAutomationsForTrigger(input: DispatchInput): Promise<void> {
   try {
+    if (!(await isAutomationAllowedNow(input.userId))) {
+      return
+    }
+
+    if (input.context?.conversation_id) {
+      const { data: conversation } = await supabaseAdmin()
+        .from('conversations')
+        .select('bot_status, bot_paused_until, assigned_agent_id')
+        .eq('id', input.context.conversation_id)
+        .eq('user_id', input.userId)
+        .maybeSingle()
+
+      if (conversation && !shouldRunAutomation(conversation)) {
+        return
+      }
+    }
+
     const db = supabaseAdmin()
     const { data: automations, error } = await db
       .from('automations')

@@ -261,6 +261,8 @@ export async function POST(request: Request) {
         message_id: waMessageId,
         status: 'sent',
         reply_to_message_id: reply_to_message_id || null,
+        message_source: message_type === 'template' ? 'template' : 'api',
+        direction: 'outbound',
       })
       .select()
       .single()
@@ -279,6 +281,7 @@ export async function POST(request: Request) {
       .update({
         last_message_text: content_text || `[${message_type}]`,
         last_message_at: new Date().toISOString(),
+        last_message_source: 'api',
         updated_at: new Date().toISOString(),
       })
       .eq('id', conversation_id)

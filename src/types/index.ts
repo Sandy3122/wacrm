@@ -67,6 +67,10 @@ export interface ContactNote {
 }
 
 export type ConversationStatus = 'open' | 'pending' | 'closed';
+export type BotStatus = 'active' | 'paused' | 'closed';
+export type MessageSource = 'customer' | 'api' | 'business_app' | 'template';
+export type MessageDirection = 'inbound' | 'outbound';
+export type WhatsAppConnectionType = 'legacy' | 'coexistence';
 
 export interface Conversation {
   id: string;
@@ -76,6 +80,9 @@ export interface Conversation {
   assigned_agent_id?: string;
   last_message_text?: string;
   last_message_at?: string;
+  last_message_source?: MessageSource;
+  bot_status?: BotStatus;
+  bot_paused_until?: string | null;
   unread_count: number;
   created_at: string;
   updated_at: string;
@@ -106,6 +113,9 @@ export interface Message {
   template_name?: string;
   message_id?: string;
   status: MessageStatus;
+  message_source?: MessageSource;
+  direction?: MessageDirection;
+  raw_payload?: Record<string, unknown>;
   created_at: string;
   reply_to_message_id?: string;
   /**
@@ -134,9 +144,21 @@ export interface WhatsAppConfig {
   user_id: string;
   phone_number_id: string;
   waba_id?: string;
+  business_id?: string;
+  display_phone_number?: string;
   access_token: string;
   verify_token?: string;
   status: 'connected' | 'disconnected';
+  connection_type?: WhatsAppConnectionType;
+  webhook_status?: 'pending' | 'verified' | 'error';
+  app_sync_enabled?: boolean;
+  pause_bot_on_app_reply?: boolean;
+  bot_pause_duration_hours?: number;
+  automation_outside_hours?: boolean;
+  fallback_message?: string;
+  history_sync_status?: 'pending' | 'complete' | 'failed';
+  coexistence_onboarded_at?: string;
+  last_webhook_at?: string;
   connected_at?: string;
 }
 
