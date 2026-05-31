@@ -7,6 +7,8 @@ import {
   validateStepsForActivation,
   validateTriggerForActivation,
 } from '@/lib/automations/validate'
+import { getRequestWorkspace } from '@/lib/auth/request-context'
+import { can } from '@/lib/auth/rbac'
 
 export async function GET() {
   const supabase = await createClient()
@@ -29,6 +31,15 @@ export async function POST(request: Request) {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  // RBAC: editing automations requires automation.edit (owner/admin).
+  const ws = await getRequestWorkspace()
+  if (ws && !can(ws.role, 'automation.edit')) {
+    return NextResponse.json(
+      { error: 'You do not have permission to create automations' },
+      { status: 403 },
+    )
+  }
 
   const body = await request.json().catch(() => null)
   if (!body) return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })

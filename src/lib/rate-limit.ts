@@ -125,6 +125,10 @@ export const RATE_LIMITS = {
    *  fidget with reactions and a single "swap" is actually two calls
    *  (remove + add) under the hood. */
   react: { limit: 120, windowMs: 60_000 },
+  /** Inbound webhook deliveries per phone number. High ceiling — Meta
+   *  can burst — but caps a flood / spoof attempt from a single number
+   *  at 600/min before we even parse the body. */
+  webhook: { limit: 600, windowMs: 60_000 },
 } as const;
 
 /** Test-only helper. Clears the in-memory state so unit tests don't

@@ -22,10 +22,16 @@ export interface ContactOutcome {
   wasCreated: boolean
 }
 
+export interface ContactScope {
+  workspaceId?: string | null
+  organizationId?: string | null
+}
+
 export async function findOrCreateContact(
   userId: string,
   phone: string,
   name: string,
+  scope: ContactScope = {},
 ): Promise<ContactOutcome | null> {
   const { data: contacts, error: contactsError } = await supabaseAdmin()
     .from('contacts')
@@ -55,6 +61,8 @@ export async function findOrCreateContact(
       user_id: userId,
       phone,
       name: name || phone,
+      workspace_id: scope.workspaceId ?? null,
+      organization_id: scope.organizationId ?? null,
     })
     .select()
     .single()
@@ -75,11 +83,23 @@ export interface ConversationRow {
   bot_status?: string
   bot_paused_until?: string | null
   assigned_agent_id?: string | null
+  whatsapp_account_id?: string | null
+  workspace_id?: string | null
+  organization_id?: string | null
+  customer_wa_id?: string | null
+}
+
+export interface ConversationScope {
+  workspaceId?: string | null
+  organizationId?: string | null
+  whatsappAccountId?: string | null
+  customerWaId?: string | null
 }
 
 export async function findOrCreateConversation(
   userId: string,
   contactId: string,
+  scope: ConversationScope = {},
 ): Promise<ConversationRow | null> {
   const { data: existing, error: findError } = await supabaseAdmin()
     .from('conversations')
@@ -89,6 +109,22 @@ export async function findOrCreateConversation(
     .single()
 
   if (!findError && existing) {
+    // Backfill scope columns on a pre-existing conversation if the
+    // webhook now knows the account/workspace and the row predates it.
+    if (
+      scope.whatsappAccountId &&
+      !existing.whatsapp_account_id
+    ) {
+      await supabaseAdmin()
+        .from('conversations')
+        .update({
+          whatsapp_account_id: scope.whatsappAccountId,
+          workspace_id: scope.workspaceId ?? existing.workspace_id ?? null,
+          organization_id: scope.organizationId ?? existing.organization_id ?? null,
+          customer_wa_id: scope.customerWaId ?? existing.customer_wa_id ?? null,
+        })
+        .eq('id', existing.id)
+    }
     return existing
   }
 
@@ -97,6 +133,10 @@ export async function findOrCreateConversation(
     .insert({
       user_id: userId,
       contact_id: contactId,
+      workspace_id: scope.workspaceId ?? null,
+      organization_id: scope.organizationId ?? null,
+      whatsapp_account_id: scope.whatsappAccountId ?? null,
+      customer_wa_id: scope.customerWaId ?? null,
     })
     .select()
     .single()

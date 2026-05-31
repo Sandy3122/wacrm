@@ -18,6 +18,42 @@ import { supabaseAdmin } from './admin-client'
 import { engineSendText, engineSendTemplate } from './meta-send'
 import { shouldRunAutomation } from '@/lib/whatsapp/bot-gate'
 import { isAutomationAllowedNow } from '@/lib/whatsapp/business-hours'
+import { recordUsage } from '@/lib/billing/usage'
+
+/**
+ * Record one automation_runs usage event for plan metering. Resolves
+ * the automation's workspace; best-effort, never throws.
+ */
+async function recordAutomationRunUsage(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  automation: Automation,
+): Promise<void> {
+  try {
+    const wsId = (automation as { workspace_id?: string | null }).workspace_id
+    const orgId = (automation as { organization_id?: string | null }).organization_id
+    let workspaceId = wsId ?? null
+    let organizationId = orgId ?? null
+    if (!workspaceId) {
+      const { data } = await db
+        .from('automations')
+        .select('workspace_id, organization_id')
+        .eq('id', automation.id)
+        .maybeSingle()
+      workspaceId = data?.workspace_id ?? null
+      organizationId = data?.organization_id ?? null
+    }
+    if (workspaceId) {
+      await recordUsage({
+        workspaceId,
+        organizationId,
+        metric: 'automation_runs',
+      })
+    }
+  } catch {
+    // metering must never break a run
+  }
+}
 
 // ------------------------------------------------------------
 // Public API
@@ -166,6 +202,10 @@ async function executeAutomation(automation: Automation, input: DispatchInput) {
     console.error('[automations] cannot create log:', logErr)
     return
   }
+
+  // Usage metering (Sprint 7): one automation_runs per executed run,
+  // scoped to the automation's workspace. Best-effort.
+  void recordAutomationRunUsage(db, automation)
 
   await executeStepsFrom({
     automation,

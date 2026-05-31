@@ -14,6 +14,8 @@ import {
   rateLimitResponse,
   RATE_LIMITS,
 } from '@/lib/rate-limit'
+import { getRequestWorkspace } from '@/lib/auth/request-context'
+import { checkUsageLimit, recordUsage } from '@/lib/billing/usage'
 
 export async function POST(request: Request) {
   try {
@@ -36,6 +38,25 @@ export async function POST(request: Request) {
     const limit = checkRateLimit(`send:${user.id}`, RATE_LIMITS.send)
     if (!limit.success) {
       return rateLimitResponse(limit)
+    }
+
+    // Plan usage enforcement (Sprint 7). Resolves the active workspace
+    // and blocks the send if the monthly message limit is reached.
+    // Fails open on any internal error so a billing-table hiccup never
+    // takes down messaging.
+    const ws = await getRequestWorkspace()
+    if (ws) {
+      const usage = await checkUsageLimit({
+        workspaceId: ws.workspaceId,
+        organizationId: ws.organizationId,
+        metric: 'messages_sent',
+      })
+      if (!usage.allowed) {
+        return NextResponse.json(
+          { error: usage.reason ?? 'Message limit reached', limit: usage.limit, used: usage.used },
+          { status: 402 },
+        )
+      }
     }
 
     const body = await request.json()
@@ -315,6 +336,15 @@ export async function POST(request: Request) {
         '[flows] pause-on-agent-send threw:',
         err instanceof Error ? err.message : err,
       )
+    }
+
+    // Record usage for plan metering (best-effort).
+    if (ws) {
+      void recordUsage({
+        workspaceId: ws.workspaceId,
+        organizationId: ws.organizationId,
+        metric: 'messages_sent',
+      })
     }
 
     return NextResponse.json({

@@ -13,6 +13,9 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
+import { getAccountForUserId } from '@/lib/whatsapp/accounts'
+import { providerForResolvedAccount } from '@/lib/whatsapp/providers/factory'
+import type { WhatsAppProvider } from '@/lib/whatsapp/providers/types'
 
 // ------------------------------------------------------------
 // Flows-side Meta sender (interactive variants).
@@ -68,25 +71,36 @@ export async function engineSendText(
     throw new Error(`contact phone invalid: ${contact.phone}`)
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('user_id', args.userId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
-  }
+  const resolvedAccount = await getAccountForUserId(args.userId)
+  let accountId: string | null = null
+  let attempt: (phone: string) => Promise<string>
 
-  const accessToken = decrypt(config.access_token)
-
-  const attempt = async (phone: string): Promise<string> => {
-    const r = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
-      to: phone,
-      text: args.text,
-    })
-    return r.messageId
+  if (resolvedAccount) {
+    accountId = resolvedAccount.account.id
+    const provider = providerForResolvedAccount(resolvedAccount)
+    attempt = async (phone: string): Promise<string> => {
+      const r = await provider.sendText({ to: phone, text: args.text })
+      return r.messageId
+    }
+  } else {
+    const { data: config, error: configErr } = await db
+      .from('whatsapp_config')
+      .select('*')
+      .eq('user_id', args.userId)
+      .single()
+    if (configErr || !config) {
+      throw new Error('WhatsApp not configured for this account')
+    }
+    const accessToken = decrypt(config.access_token)
+    attempt = async (phone: string): Promise<string> => {
+      const r = await sendTextMessage({
+        phoneNumberId: config.phone_number_id,
+        accessToken,
+        to: phone,
+        text: args.text,
+      })
+      return r.messageId
+    }
   }
 
   const variants = phoneVariants(sanitized)
@@ -113,6 +127,8 @@ export async function engineSendText(
 
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: args.conversationId,
+    whatsapp_account_id: accountId,
+    provider_message_id: waMessageId,
     sender_type: 'bot',
     content_type: 'text',
     content_text: args.text,
@@ -215,22 +231,45 @@ async function sendInteractiveViaMeta(
     throw new Error(`contact phone invalid: ${contact.phone}`)
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('user_id', input.userId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
-  }
+  const resolvedAccount = await getAccountForUserId(input.userId)
+  let accountId: string | null = null
+  let provider: WhatsAppProvider | null = null
+  // Legacy fallback config (only used when no account row exists).
+  let legacyConfig: { phone_number_id: string; access_token: string } | null = null
 
-  const accessToken = decrypt(config.access_token)
+  if (resolvedAccount) {
+    accountId = resolvedAccount.account.id
+    provider = providerForResolvedAccount(resolvedAccount)
+  } else {
+    const { data: config, error: configErr } = await db
+      .from('whatsapp_config')
+      .select('*')
+      .eq('user_id', input.userId)
+      .single()
+    if (configErr || !config) {
+      throw new Error('WhatsApp not configured for this account')
+    }
+    legacyConfig = {
+      phone_number_id: config.phone_number_id,
+      access_token: decrypt(config.access_token),
+    }
+  }
 
   const attempt = async (phone: string): Promise<string> => {
     if (input.kind === 'buttons') {
+      if (provider) {
+        const r = await provider.sendInteractiveButtons({
+          to: phone,
+          bodyText: input.bodyText,
+          buttons: input.buttons,
+          headerText: input.headerText,
+          footerText: input.footerText,
+        })
+        return r.messageId
+      }
       const r = await sendInteractiveButtons({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        phoneNumberId: legacyConfig!.phone_number_id,
+        accessToken: legacyConfig!.access_token,
         to: phone,
         bodyText: input.bodyText,
         buttons: input.buttons,
@@ -239,9 +278,20 @@ async function sendInteractiveViaMeta(
       })
       return r.messageId
     }
+    if (provider) {
+      const r = await provider.sendInteractiveList({
+        to: phone,
+        bodyText: input.bodyText,
+        buttonLabel: input.buttonLabel,
+        sections: input.sections,
+        headerText: input.headerText,
+        footerText: input.footerText,
+      })
+      return r.messageId
+    }
     const r = await sendInteractiveList({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      phoneNumberId: legacyConfig!.phone_number_id,
+      accessToken: legacyConfig!.access_token,
       to: phone,
       bodyText: input.bodyText,
       buttonLabel: input.buttonLabel,
@@ -288,6 +338,8 @@ async function sendInteractiveViaMeta(
   // when their reply arrives.
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: input.conversationId,
+    whatsapp_account_id: accountId,
+    provider_message_id: waMessageId,
     sender_type: 'bot',
     content_type: 'interactive',
     content_text: input.bodyText,

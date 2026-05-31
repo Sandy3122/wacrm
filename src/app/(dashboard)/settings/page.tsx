@@ -1,9 +1,11 @@
 'use client';
 
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Settings, MessageSquare, Tag, User, Palette } from 'lucide-react';
+import { Settings, MessageSquare, Tag, User, Palette, Smartphone, Gauge } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { WhatsAppConfig } from '@/components/settings/whatsapp-config';
+import { WhatsAppAccounts } from '@/components/settings/whatsapp-accounts';
+import { UsagePanel } from '@/components/settings/usage-panel';
 import { TemplateManager } from '@/components/settings/template-manager';
 import { TagManager } from '@/components/settings/tag-manager';
 import { ProfileForm } from '@/components/settings/profile-form';
@@ -14,8 +16,10 @@ import { AppearancePanel } from '@/components/settings/appearance-panel';
 const TAB_VALUES = [
   'profile',
   'whatsapp',
+  'accounts',
   'templates',
   'tags',
+  'usage',
   'appearance',
 ] as const;
 type TabValue = (typeof TAB_VALUES)[number];
@@ -68,6 +72,13 @@ export default function SettingsPage() {
             WhatsApp Config
           </TabsTrigger>
           <TabsTrigger
+            value="accounts"
+            className="data-active:bg-slate-800 data-active:text-primary text-slate-400"
+          >
+            <Smartphone className="size-4" />
+            Accounts
+          </TabsTrigger>
+          <TabsTrigger
             value="templates"
             className="data-active:bg-slate-800 data-active:text-primary text-slate-400"
           >
@@ -80,6 +91,13 @@ export default function SettingsPage() {
           >
             <Tag className="size-4" />
             Tags
+          </TabsTrigger>
+          <TabsTrigger
+            value="usage"
+            className="data-active:bg-slate-800 data-active:text-primary text-slate-400"
+          >
+            <Gauge className="size-4" />
+            Usage
           </TabsTrigger>
           <TabsTrigger
             value="appearance"
@@ -100,12 +118,20 @@ export default function SettingsPage() {
           <WhatsAppConfig />
         </TabsContent>
 
+        <TabsContent value="accounts">
+          <WhatsAppAccounts />
+        </TabsContent>
+
         <TabsContent value="templates">
           <TemplateManager />
         </TabsContent>
 
         <TabsContent value="tags">
           <TagManager />
+        </TabsContent>
+
+        <TabsContent value="usage">
+          <UsagePanel />
         </TabsContent>
 
         <TabsContent value="appearance">

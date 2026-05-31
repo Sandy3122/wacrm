@@ -13,6 +13,8 @@ import {
   rateLimitResponse,
   RATE_LIMITS,
 } from '@/lib/rate-limit'
+import { getRequestWorkspace } from '@/lib/auth/request-context'
+import { checkUsageLimit, recordUsage } from '@/lib/billing/usage'
 
 interface BroadcastResult {
   phone: string
@@ -107,6 +109,35 @@ export async function POST(request: Request) {
       )
     }
 
+    // Plan enforcement (Sprint 7): check both the broadcast-count limit
+    // and that the message volume fits the monthly message allowance.
+    const ws = await getRequestWorkspace()
+    if (ws) {
+      const broadcastLimit = await checkUsageLimit({
+        workspaceId: ws.workspaceId,
+        organizationId: ws.organizationId,
+        metric: 'broadcast_sent',
+      })
+      if (!broadcastLimit.allowed) {
+        return NextResponse.json(
+          { error: broadcastLimit.reason ?? 'Broadcast limit reached' },
+          { status: 402 },
+        )
+      }
+      const msgLimit = await checkUsageLimit({
+        workspaceId: ws.workspaceId,
+        organizationId: ws.organizationId,
+        metric: 'messages_sent',
+        count: recipients.length,
+      })
+      if (!msgLimit.allowed) {
+        return NextResponse.json(
+          { error: msgLimit.reason ?? 'Monthly message limit reached' },
+          { status: 402 },
+        )
+      }
+    }
+
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
       .select('*')
@@ -191,6 +222,23 @@ export async function POST(request: Request) {
           error: lastError || 'Unknown error',
         })
         failedCount++
+      }
+    }
+
+    // Record usage: one broadcast + N messages (best-effort).
+    if (ws) {
+      void recordUsage({
+        workspaceId: ws.workspaceId,
+        organizationId: ws.organizationId,
+        metric: 'broadcast_sent',
+      })
+      if (sentCount > 0) {
+        void recordUsage({
+          workspaceId: ws.workspaceId,
+          organizationId: ws.organizationId,
+          metric: 'messages_sent',
+          quantity: sentCount,
+        })
       }
     }
 

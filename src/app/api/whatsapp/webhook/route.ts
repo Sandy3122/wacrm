@@ -12,6 +12,15 @@ import {
   logWebhookEvent,
   touchLastWebhookAt,
 } from '@/lib/whatsapp/config-resolver'
+import {
+  ingestRawEvent,
+  markEventStatus,
+} from '@/lib/whatsapp/webhook-ingest'
+import {
+  checkRateLimit,
+  rateLimitResponse,
+  RATE_LIMITS,
+} from '@/lib/rate-limit'
 import { processBusinessAppEcho } from '@/lib/whatsapp/webhook-echo'
 import {
   processHistorySync,
@@ -211,6 +220,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
+  // Rate-limit per phone_number_id (Sprint 8). Bursty providers are
+  // fine; a single number flooding past the ceiling is throttled.
+  const phoneId =
+    body.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id ?? 'unknown'
+  const limit = checkRateLimit(`webhook:${phoneId}`, RATE_LIMITS.webhook)
+  if (!limit.success) {
+    return rateLimitResponse(limit)
+  }
+
   // Process asynchronously so we can ack Meta within their timeout.
   processWebhook(body).catch((error) => {
     console.error('Error processing webhook:', error)
@@ -219,7 +237,7 @@ export async function POST(request: Request) {
   return NextResponse.json({ status: 'received' }, { status: 200 })
 }
 
-async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
+export async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   if (!body.entry) return
 
   for (const entry of body.entry) {
@@ -243,60 +261,119 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
       }
 
       const { config, accessToken: decryptedAccessToken } = resolved
-      void touchLastWebhookAt(config.id)
-      void logWebhookEvent({
-        userId: config.user_id,
+
+      // Durable ingest (Sprint 4): persist the raw change first, with a
+      // dedupe key derived from the message/echo ids so provider
+      // retries don't double-process. isNew=false → skip (already seen).
+      const dedupeKey = deriveDedupeKey(phoneNumberId, field, value)
+      const ingest = await ingestRawEvent({
+        provider: (config.provider_type as string) ?? 'meta',
         phoneNumberId,
-        field,
-        payload: value,
+        whatsappAccountId: (config.whatsapp_account_id as string) ?? null,
+        workspaceId: (config.workspace_id as string) ?? null,
+        dedupeKey,
+        payload: { field, value },
       })
-
-      if (field === 'smb_message_echoes' || field === 'message_echoes') {
-        const echoes = value.message_echoes
-        if (echoes?.length) {
-          await processBusinessAppEcho({
-            echoes,
-            config,
-            rawChangeValue: value,
-          })
-        }
+      if (dedupeKey && !ingest.isNew) {
+        // Duplicate delivery — already ingested/processed. Skip silently.
         continue
       }
 
-      if (field === 'history') {
-        await processHistorySync({
-          value: value as Parameters<typeof processHistorySync>[0]['value'],
-          config,
-        })
-        continue
-      }
-
-      if (field === 'smb_app_state_sync') {
-        await processSmbAppStateSync({
-          value: value as Parameters<typeof processSmbAppStateSync>[0]['value'],
-          config,
-        })
-        continue
-      }
-
-      if (field !== 'messages' && !value.messages) {
-        continue
-      }
-
-      if (!value.messages || !value.contacts) continue
-
-      for (let i = 0; i < value.messages.length; i++) {
-        const message = value.messages[i]
-        const contact = value.contacts[i] || value.contacts[0]
-
-        await processMessage(
-          message,
-          contact,
-          config.user_id,
-          decryptedAccessToken,
-        )
+      try {
+        await processChange({ field, value, config, decryptedAccessToken })
+        await markEventStatus(ingest.id, 'processed')
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.error('[webhook] processChange failed:', message)
+        await markEventStatus(ingest.id, 'failed', { error: message })
       }
     }
+  }
+}
+
+/**
+ * Derive a stable dedupe key for a webhook change. For message/echo
+ * changes we key on the message ids; otherwise return null so the
+ * ingest layer hashes the full payload (statuses can legitimately
+ * repeat across the delivery ladder, so they aren't deduped here).
+ */
+function deriveDedupeKey(
+  phoneNumberId: string,
+  field: string,
+  value: WhatsAppWebhookEntry['changes'][number]['value'],
+): string | null {
+  if (value.messages?.length) {
+    return `msg:${phoneNumberId}:${value.messages.map((m) => m.id).join(',')}`
+  }
+  if (value.message_echoes?.length) {
+    return `echo:${phoneNumberId}:${value.message_echoes.map((m) => m.id).join(',')}`
+  }
+  void field
+  return null
+}
+
+type ResolvedConfig = NonNullable<
+  Awaited<ReturnType<typeof getWhatsAppConfigForPhoneNumberId>>
+>['config']
+
+/**
+ * Normalize + dispatch a single webhook change. Extracted from
+ * processWebhook so the durable-ingest wrapper can catch failures per
+ * change and mark them replayable.
+ */
+async function processChange(args: {
+  field: string
+  value: WhatsAppWebhookEntry['changes'][number]['value']
+  config: ResolvedConfig
+  decryptedAccessToken: string
+}) {
+  const { field, value, config, decryptedAccessToken } = args
+  const phoneNumberId = value.metadata?.phone_number_id
+
+  void touchLastWebhookAt(config.id)
+  void logWebhookEvent({
+    userId: config.user_id,
+    phoneNumberId: phoneNumberId ?? '',
+    field,
+    payload: value,
+  })
+
+  if (field === 'smb_message_echoes' || field === 'message_echoes') {
+    const echoes = value.message_echoes
+    if (echoes?.length) {
+      await processBusinessAppEcho({ echoes, config, rawChangeValue: value })
+    }
+    return
+  }
+
+  if (field === 'history') {
+    await processHistorySync({
+      value: value as Parameters<typeof processHistorySync>[0]['value'],
+      config,
+    })
+    return
+  }
+
+  if (field === 'smb_app_state_sync') {
+    await processSmbAppStateSync({
+      value: value as Parameters<typeof processSmbAppStateSync>[0]['value'],
+      config,
+    })
+    return
+  }
+
+  if (field !== 'messages' && !value.messages) return
+  if (!value.messages || !value.contacts) return
+
+  for (let i = 0; i < value.messages.length; i++) {
+    const message = value.messages[i]
+    const contact = value.contacts[i] || value.contacts[0]
+
+    await processMessage(message, contact, config.user_id, decryptedAccessToken, {
+      whatsappAccountId: (config.whatsapp_account_id as string) ?? null,
+      workspaceId: (config.workspace_id as string) ?? null,
+      organizationId: (config.organization_id as string) ?? null,
+    })
   }
 }
 
@@ -517,7 +594,12 @@ async function processMessage(
   message: WhatsAppMessage,
   contact: { profile: { name: string }; wa_id: string },
   userId: string,
-  accessToken: string
+  accessToken: string,
+  scope: {
+    whatsappAccountId: string | null
+    workspaceId: string | null
+    organizationId: string | null
+  } = { whatsappAccountId: null, workspaceId: null, organizationId: null },
 ) {
   const senderPhone = normalizePhone(message.from)
   const contactName = contact.profile.name
@@ -526,7 +608,8 @@ async function processMessage(
   const contactOutcome = await findOrCreateContact(
     userId,
     senderPhone,
-    contactName
+    contactName,
+    { workspaceId: scope.workspaceId, organizationId: scope.organizationId },
   )
   if (!contactOutcome) return
   const contactRecord = contactOutcome.contact
@@ -534,7 +617,13 @@ async function processMessage(
   // Find or create conversation
   const conversation = await findOrCreateConversation(
     userId,
-    contactRecord.id
+    contactRecord.id,
+    {
+      workspaceId: scope.workspaceId,
+      organizationId: scope.organizationId,
+      whatsappAccountId: scope.whatsappAccountId,
+      customerWaId: contact.wa_id,
+    },
   )
   if (!conversation) return
 
@@ -613,6 +702,8 @@ async function processMessage(
 
   const { error: msgError } = await supabaseAdmin().from('messages').insert({
     conversation_id: conversation.id,
+    whatsapp_account_id: scope.whatsappAccountId,
+    provider_message_id: message.id,
     sender_type: 'customer',
     content_type: contentType,
     content_text: contentText,

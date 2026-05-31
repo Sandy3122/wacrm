@@ -7,6 +7,9 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
+import { getAccountForUserId } from '@/lib/whatsapp/accounts'
+import { providerForResolvedAccount } from '@/lib/whatsapp/providers/factory'
+import { recordUsage } from '@/lib/billing/usage'
 
 // ------------------------------------------------------------
 // Automation-side Meta sender.
@@ -75,36 +78,60 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     throw new Error(`contact phone invalid: ${contact.phone}`)
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('user_id', input.userId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
-  }
+  // Prefer the new whatsapp_accounts + provider abstraction (Sprint 3).
+  // Fall back to the legacy whatsapp_config + direct Meta calls for
+  // installs that haven't migrated yet.
+  const resolvedAccount = await getAccountForUserId(input.userId)
 
-  const accessToken = decrypt(config.access_token)
+  let accountId: string | null = null
+  let attempt: (phone: string) => Promise<string>
 
-  const attempt = async (phone: string): Promise<string> => {
-    if (input.kind === 'template') {
-      const r = await sendTemplateMessage({
+  if (resolvedAccount) {
+    accountId = resolvedAccount.account.id
+    const provider = providerForResolvedAccount(resolvedAccount)
+    attempt = async (phone: string): Promise<string> => {
+      if (input.kind === 'template') {
+        const r = await provider.sendTemplate({
+          to: phone,
+          templateName: input.templateName,
+          language: input.language,
+          params: input.params,
+        })
+        return r.messageId
+      }
+      const r = await provider.sendText({ to: phone, text: input.text })
+      return r.messageId
+    }
+  } else {
+    const { data: config, error: configErr } = await db
+      .from('whatsapp_config')
+      .select('*')
+      .eq('user_id', input.userId)
+      .single()
+    if (configErr || !config) {
+      throw new Error('WhatsApp not configured for this account')
+    }
+    const accessToken = decrypt(config.access_token)
+    attempt = async (phone: string): Promise<string> => {
+      if (input.kind === 'template') {
+        const r = await sendTemplateMessage({
+          phoneNumberId: config.phone_number_id,
+          accessToken,
+          to: phone,
+          templateName: input.templateName,
+          language: input.language,
+          params: input.params,
+        })
+        return r.messageId
+      }
+      const r = await sendTextMessage({
         phoneNumberId: config.phone_number_id,
         accessToken,
         to: phone,
-        templateName: input.templateName,
-        language: input.language,
-        params: input.params,
+        text: input.text,
       })
       return r.messageId
     }
-    const r = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
-      to: phone,
-      text: input.text,
-    })
-    return r.messageId
   }
 
   // Same phone-variant retry as /api/whatsapp/send — Meta sandbox and
@@ -141,6 +168,8 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
 
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: input.conversationId,
+    whatsapp_account_id: accountId,
+    provider_message_id: waMessageId,
     sender_type: 'bot',
     content_type,
     content_text,
@@ -167,5 +196,36 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     })
     .eq('id', input.conversationId)
 
+  // Record usage for plan metering (best-effort). Resolve scope from
+  // the conversation's workspace if available.
+  void recordAutomationMessageUsage(db, input.conversationId)
+
   return { whatsapp_message_id: waMessageId }
+}
+
+/**
+ * Best-effort usage recording for an automation/engine-sent message.
+ * Looks up the conversation's workspace and records one messages_sent.
+ */
+async function recordAutomationMessageUsage(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  conversationId: string,
+): Promise<void> {
+  try {
+    const { data: conv } = await db
+      .from('conversations')
+      .select('workspace_id, organization_id')
+      .eq('id', conversationId)
+      .maybeSingle()
+    if (conv?.workspace_id) {
+      await recordUsage({
+        workspaceId: conv.workspace_id,
+        organizationId: conv.organization_id ?? null,
+        metric: 'messages_sent',
+      })
+    }
+  } catch {
+    // ignore — usage metering must never break a send
+  }
 }

@@ -67,13 +67,31 @@ export async function processBusinessAppEcho(args: {
 }): Promise<void> {
   const { echoes, config, rawChangeValue } = args
   const userId = config.user_id
+  const scope = {
+    workspaceId: (config.workspace_id as string | null) ?? null,
+    organizationId: (config.organization_id as string | null) ?? null,
+  }
+  const whatsappAccountId = (config.whatsapp_account_id as string | null) ?? null
 
   for (const echo of echoes) {
     const customerPhone = normalizePhone(echo.to)
-    const contactOutcome = await findOrCreateContact(userId, customerPhone, customerPhone)
+    const contactOutcome = await findOrCreateContact(
+      userId,
+      customerPhone,
+      customerPhone,
+      scope,
+    )
     if (!contactOutcome) continue
 
-    const conversation = await findOrCreateConversation(userId, contactOutcome.contact.id)
+    const conversation = await findOrCreateConversation(
+      userId,
+      contactOutcome.contact.id,
+      {
+        ...scope,
+        whatsappAccountId,
+        customerWaId: customerPhone,
+      },
+    )
     if (!conversation) continue
 
     const contentText = echoContentText(echo)
@@ -81,6 +99,8 @@ export async function processBusinessAppEcho(args: {
 
     const { error: insertErr } = await supabaseAdmin().from('messages').insert({
       conversation_id: conversation.id,
+      whatsapp_account_id: whatsappAccountId,
+      provider_message_id: echo.id,
       sender_type: 'agent',
       content_type: contentType,
       content_text: contentText,

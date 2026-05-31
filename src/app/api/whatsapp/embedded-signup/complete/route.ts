@@ -62,7 +62,7 @@ export async function POST(request: Request) {
 
     const { access_token: accessToken } = await exchangeEmbeddedSignupCode(code)
 
-    let wabaId = wabaIdInput ?? null
+    const wabaId = wabaIdInput ?? null
     let phoneNumberId = phoneNumberIdInput ?? null
     let displayPhoneNumber = displayPhoneInput ?? null
 
