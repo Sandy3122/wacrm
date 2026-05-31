@@ -9,6 +9,7 @@ import {
   subscribeAppToWaba,
 } from '@/lib/whatsapp/embedded-signup-meta'
 import { randomBytes } from 'crypto'
+import { syncLegacyConfigToAccount } from '@/lib/whatsapp/account-sync'
 
 function supabaseAdmin() {
   return createClient(
@@ -160,6 +161,16 @@ export async function POST(request: Request) {
         console.error('[embedded-signup] insert failed:', insertError)
         return NextResponse.json({ error: 'Failed to save configuration' }, { status: 500 })
       }
+    }
+
+    // Mirror into whatsapp_accounts for the new Accounts UI + routing.
+    const { data: savedConfig } = await supabase
+      .from('whatsapp_config')
+      .select('*')
+      .eq('user_id', user.id)
+      .maybeSingle()
+    if (savedConfig) {
+      await syncLegacyConfigToAccount(savedConfig)
     }
 
     return NextResponse.json({

@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { sendTextMessage, sendTemplateMessage } from '@/lib/whatsapp/meta-api'
-import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
 import {
   sanitizePhoneForMeta,
@@ -16,6 +14,7 @@ import {
 } from '@/lib/rate-limit'
 import { getRequestWorkspace } from '@/lib/auth/request-context'
 import { checkUsageLimit, recordUsage } from '@/lib/billing/usage'
+import { resolveOutbound } from '@/lib/whatsapp/outbound'
 
 export async function POST(request: Request) {
   try {
@@ -123,40 +122,27 @@ export async function POST(request: Request) {
       )
     }
 
-    // Fetch and decrypt WhatsApp config
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
-
-    if (configError || !config) {
+    // Resolve the outbound context — prefers the conversation's bound
+    // WhatsApp account (so multi-account workspaces reply through the
+    // right number / provider), then the workspace, then the user's
+    // account, then the legacy whatsapp_config row.
+    let outbound
+    try {
+      outbound = await resolveOutbound({
+        accountId: conversation.whatsapp_account_id ?? null,
+        workspaceId: ws?.workspaceId ?? null,
+        userId: user.id,
+      })
+    } catch (err) {
       return NextResponse.json(
-        { error: 'WhatsApp not configured. Please set up your WhatsApp integration first.' },
+        {
+          error:
+            err instanceof Error
+              ? err.message
+              : 'WhatsApp not configured. Please set up your WhatsApp integration first.',
+        },
         { status: 400 }
       )
-    }
-
-    const accessToken = decrypt(config.access_token)
-
-    // Self-heal legacy CBC-encrypted tokens. Fire-and-forget: we
-    // return from the send without waiting, so a failed upgrade just
-    // means the next send tries again. The upgrade is idempotent —
-    // concurrent sends both produce valid GCM ciphertexts of the same
-    // plaintext, last write wins.
-    if (isLegacyFormat(config.access_token)) {
-      void supabase
-        .from('whatsapp_config')
-        .update({ access_token: encrypt(accessToken) })
-        .eq('id', config.id)
-        .then(({ error }) => {
-          if (error) {
-            console.warn(
-              '[whatsapp/send] access_token GCM upgrade failed:',
-              error.message,
-            )
-          }
-        })
     }
 
     // Resolve the reply target (if any) to its Meta message_id, which is
@@ -200,9 +186,7 @@ export async function POST(request: Request) {
 
     const attempt = async (phone: string): Promise<string> => {
       if (message_type === 'template') {
-        const result = await sendTemplateMessage({
-          phoneNumberId: config.phone_number_id,
-          accessToken,
+        const result = await outbound.provider.sendTemplate({
           to: phone,
           templateName: template_name,
           params: template_params || [],
@@ -210,9 +194,7 @@ export async function POST(request: Request) {
         })
         return result.messageId
       }
-      const result = await sendTextMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+      const result = await outbound.provider.sendText({
         to: phone,
         text: content_text,
         contextMessageId,
@@ -274,6 +256,9 @@ export async function POST(request: Request) {
       .from('messages')
       .insert({
         conversation_id,
+        whatsapp_account_id: outbound.accountId,
+        provider_message_id: waMessageId,
+        provider: outbound.providerType,
         sender_type: 'agent',
         content_type: message_type,
         content_text: content_text || null,

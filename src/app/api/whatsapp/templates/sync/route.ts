@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { resolveOutbound } from '@/lib/whatsapp/outbound'
+import { getRequestWorkspace } from '@/lib/auth/request-context'
 import type {
   MessageTemplateStatus,
   TemplateButton,
@@ -159,13 +160,15 @@ export async function POST() {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
-
-    if (configError || !config) {
+    // Resolve outbound context (accounts model OR legacy config).
+    const ws = await getRequestWorkspace()
+    let outbound
+    try {
+      outbound = await resolveOutbound({
+        workspaceId: ws?.workspaceId ?? null,
+        userId: user.id,
+      })
+    } catch {
       return NextResponse.json(
         {
           error:
@@ -175,7 +178,20 @@ export async function POST() {
       )
     }
 
-    if (!config.waba_id) {
+    // Template sync uses Meta's Graph templates endpoint — only valid
+    // for Meta-backed accounts. BSPs manage templates on their own
+    // dashboards.
+    if (outbound.providerType !== 'meta') {
+      return NextResponse.json(
+        {
+          error:
+            'Template sync is only available for Meta Cloud API accounts. Manage templates in your BSP dashboard.',
+        },
+        { status: 400 },
+      )
+    }
+
+    if (!outbound.wabaId) {
       return NextResponse.json(
         {
           error:
@@ -185,12 +201,20 @@ export async function POST() {
       )
     }
 
-    const accessToken = decrypt(config.access_token)
+    if (!outbound.accessToken) {
+      return NextResponse.json(
+        { error: 'Access token unavailable for this account.' },
+        { status: 400 },
+      )
+    }
+
+    const accessToken = outbound.accessToken
+    const wabaId = outbound.wabaId
 
     const metaTemplates: MetaTemplate[] = []
     let nextUrl:
       | string
-      | null = `${META_API_BASE}/${config.waba_id}/message_templates?limit=100&fields=id,name,language,status,category,components,quality_score`
+      | null = `${META_API_BASE}/${wabaId}/message_templates?limit=100&fields=id,name,language,status,category,components,quality_score`
     const PAGE_CAP = 20
     let pageCount = 0
 

@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { sendTemplateMessage } from '@/lib/whatsapp/meta-api'
-import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   sanitizePhoneForMeta,
   isValidE164,
@@ -15,6 +13,7 @@ import {
 } from '@/lib/rate-limit'
 import { getRequestWorkspace } from '@/lib/auth/request-context'
 import { checkUsageLimit, recordUsage } from '@/lib/billing/usage'
+import { resolveOutbound } from '@/lib/whatsapp/outbound'
 
 interface BroadcastResult {
   phone: string
@@ -138,13 +137,14 @@ export async function POST(request: Request) {
       }
     }
 
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
-
-    if (configError || !config) {
+    // Resolve the outbound context (new accounts model OR legacy config).
+    let outbound
+    try {
+      outbound = await resolveOutbound({
+        workspaceId: ws?.workspaceId ?? null,
+        userId: user.id,
+      })
+    } catch {
       return NextResponse.json(
         {
           error:
@@ -153,8 +153,6 @@ export async function POST(request: Request) {
         { status: 400 }
       )
     }
-
-    const accessToken = decrypt(config.access_token)
 
     const results: BroadcastResult[] = []
     let sentCount = 0
@@ -181,9 +179,7 @@ export async function POST(request: Request) {
 
       for (const variant of variants) {
         try {
-          const result = await sendTemplateMessage({
-            phoneNumberId: config.phone_number_id,
-            accessToken,
+          const result = await outbound.provider.sendTemplate({
             to: variant,
             templateName: template_name,
             language: template_language || 'en_US',

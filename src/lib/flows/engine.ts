@@ -39,6 +39,7 @@ import {
   engineSendText,
 } from "./meta-send";
 import { decideFallback, resolveFallbackPolicy } from "./fallback";
+import { recordUsage } from "@/lib/billing/usage";
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
@@ -167,6 +168,29 @@ export function evaluateConditionPredicate(args: {
 // ============================================================
 
 type AdminClient = ReturnType<typeof supabaseAdmin>;
+
+/**
+ * Record one flow_runs usage event for plan metering. Resolves the
+ * flow's workspace from the DB row; best-effort, never throws.
+ */
+async function recordFlowRunUsage(db: AdminClient, flow: FlowRow): Promise<void> {
+  try {
+    const { data } = await db
+      .from("flows")
+      .select("workspace_id, organization_id")
+      .eq("id", flow.id)
+      .maybeSingle();
+    if (data?.workspace_id) {
+      await recordUsage({
+        workspaceId: data.workspace_id,
+        organizationId: data.organization_id ?? null,
+        metric: "flow_runs",
+      });
+    }
+  } catch {
+    // metering must never break a run
+  }
+}
 
 async function loadActiveRunForContact(
   db: AdminClient,
@@ -1057,6 +1081,10 @@ async function startNewRun(
     // Non-fatal — the run itself succeeded; only the counter is off.
     console.error("[flows] execution_count rpc error:", incErr.message);
   }
+
+  // Usage metering (Sprint 7): one flow_runs per started run, scoped to
+  // the flow's workspace. Best-effort.
+  void recordFlowRunUsage(db, flow);
 
   // Run the advance loop starting from the entry node.
   const outcome = await advanceFromNodeKey(db, run, flow.entry_node_id!, nodes);

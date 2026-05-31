@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import { getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
@@ -130,18 +130,42 @@ export async function GET(request: Request) {
       )
     }
 
-    // Fetch all whatsapp configs to check verify tokens
-    const { data: configs, error: configError } = await supabaseAdmin()
-      .from('whatsapp_config')
-      .select('id, verify_token')
+    // Check verify tokens across BOTH the new whatsapp_accounts table
+    // and the legacy whatsapp_config table. Either may hold the token
+    // depending on how the account was connected.
+    const [accountsRes, configsRes] = await Promise.all([
+      supabaseAdmin().from('whatsapp_accounts').select('id, verify_token'),
+      supabaseAdmin().from('whatsapp_config').select('id, verify_token'),
+    ])
 
-    if (configError || !configs) {
-      console.error('Error fetching configs for verification:', configError)
-      return NextResponse.json(
-        { error: 'Verification failed' },
-        { status: 403 }
+    if (accountsRes.error && configsRes.error) {
+      console.error(
+        'Error fetching configs for verification:',
+        accountsRes.error ?? configsRes.error,
       )
+      return NextResponse.json({ error: 'Verification failed' }, { status: 403 })
     }
+
+    // Match against whatsapp_accounts first.
+    for (const account of accountsRes.data ?? []) {
+      if (!account.verify_token) continue
+      try {
+        if (decrypt(account.verify_token) === verifyToken) {
+          void supabaseAdmin()
+            .from('whatsapp_accounts')
+            .update({ webhook_status: 'verified' })
+            .eq('id', account.id)
+          return new Response(challenge, {
+            status: 200,
+            headers: { 'Content-Type': 'text/plain' },
+          })
+        }
+      } catch {
+        // malformed / wrong-key — skip
+      }
+    }
+
+    const configs = configsRes.data ?? []
 
     // Check if any config's verify_token matches. Also collect the
     // matching row so we can opportunistically upgrade its token to

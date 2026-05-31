@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { resolveOutbound } from '@/lib/whatsapp/outbound'
+import { ProviderNotSupportedError } from '@/lib/whatsapp/providers/types'
+import { getRequestWorkspace } from '@/lib/auth/request-context'
 
 export async function GET(
   request: Request,
@@ -31,38 +32,62 @@ export async function GET(
       )
     }
 
-    // Fetch and decrypt WhatsApp config
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
+    // Resolve the outbound context (accounts model OR legacy config).
+    // Media downloads use the same credentials as sends. In a
+    // multi-account workspace, prefer the account bound to the message
+    // that references this media so we use the matching WABA's token.
+    const ws = await getRequestWorkspace()
 
-    if (configError || !config) {
+    let boundAccountId: string | null = null
+    const { data: ownerMsg } = await supabase
+      .from('messages')
+      .select('whatsapp_account_id')
+      .eq('media_url', `/api/whatsapp/media/${mediaId}`)
+      .not('whatsapp_account_id', 'is', null)
+      .limit(1)
+      .maybeSingle()
+    if (ownerMsg?.whatsapp_account_id) {
+      boundAccountId = ownerMsg.whatsapp_account_id
+    }
+
+    let outbound
+    try {
+      outbound = await resolveOutbound({
+        accountId: boundAccountId,
+        workspaceId: ws?.workspaceId ?? null,
+        userId: user.id,
+      })
+    } catch {
       return NextResponse.json(
         { error: 'WhatsApp not configured' },
         { status: 400 }
       )
     }
 
-    const accessToken = decrypt(config.access_token)
+    try {
+      // Get the download URL from the provider, then stream the bytes.
+      const mediaInfo = await outbound.provider.getMediaUrl(mediaId)
+      const { buffer, contentType } = await outbound.provider.downloadMedia(
+        mediaInfo.url,
+      )
 
-    // Get the download URL from Meta
-    const mediaInfo = await getMediaUrl({ mediaId, accessToken })
-
-    // Download the binary data
-    const { buffer, contentType } = await downloadMedia({
-      downloadUrl: mediaInfo.url,
-      accessToken,
-    })
-
-    return new Response(new Uint8Array(buffer), {
-      status: 200,
-      headers: {
-        'Content-Type': contentType || mediaInfo.mimeType || 'application/octet-stream',
-        'Cache-Control': 'public, max-age=86400',
-      },
-    })
+      return new Response(new Uint8Array(buffer), {
+        status: 200,
+        headers: {
+          'Content-Type':
+            contentType || mediaInfo.mimeType || 'application/octet-stream',
+          'Cache-Control': 'public, max-age=86400',
+        },
+      })
+    } catch (err) {
+      if (err instanceof ProviderNotSupportedError) {
+        return NextResponse.json(
+          { error: 'This WhatsApp provider does not support media downloads.' },
+          { status: 400 },
+        )
+      }
+      throw err
+    }
   } catch (error) {
     console.error('Error in WhatsApp media GET:', error)
     return NextResponse.json(

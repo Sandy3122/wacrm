@@ -1,13 +1,13 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
-import { decrypt } from '@/lib/whatsapp/encryption';
 import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
 import {
   checkRateLimit,
   rateLimitResponse,
   RATE_LIMITS,
 } from '@/lib/rate-limit';
+import { resolveOutbound } from '@/lib/whatsapp/outbound';
+import { ProviderNotSupportedError } from '@/lib/whatsapp/providers/types';
 
 /**
  * POST /api/whatsapp/react
@@ -71,7 +71,7 @@ export async function POST(request: Request) {
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, user_id, contact:contacts(phone)')
+      .select('id, user_id, whatsapp_account_id, contact:contacts(phone)')
       .eq('id', targetMessage.conversation_id)
       .eq('user_id', user.id)
       .maybeSingle();
@@ -93,37 +93,40 @@ export async function POST(request: Request) {
       );
     }
 
-    // WhatsApp config + access token
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('phone_number_id, access_token')
-      .eq('user_id', user.id)
-      .single();
-
-    if (configError || !config) {
+    // Resolve outbound context (accounts model OR legacy config).
+    let outbound;
+    try {
+      outbound = await resolveOutbound({
+        accountId: conversation.whatsapp_account_id ?? null,
+        userId: user.id,
+      });
+    } catch {
       return NextResponse.json(
         { error: 'WhatsApp not configured.' },
         { status: 400 },
       );
     }
 
-    const accessToken = decrypt(config.access_token);
     const sanitizedPhone = sanitizePhoneForMeta(contact.phone);
 
     try {
-      await sendReactionMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+      await outbound.provider.sendReaction({
         to: sanitizedPhone,
         targetMessageId: targetMessage.message_id,
         emoji,
       });
     } catch (err) {
+      if (err instanceof ProviderNotSupportedError) {
+        return NextResponse.json(
+          { error: 'This WhatsApp provider does not support reactions.' },
+          { status: 400 },
+        );
+      }
       const message =
         err instanceof Error ? err.message : 'Unknown Meta API error';
-      console.error('[whatsapp/react] Meta send failed:', message);
+      console.error('[whatsapp/react] provider send failed:', message);
       return NextResponse.json(
-        { error: `Meta API error: ${message}` },
+        { error: `Provider error: ${message}` },
         { status: 502 },
       );
     }

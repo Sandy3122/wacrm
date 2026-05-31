@@ -3,6 +3,10 @@ import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { verifyPhoneNumber } from '@/lib/whatsapp/meta-api'
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
+import {
+  syncLegacyConfigToAccount,
+  removeAccountForUser,
+} from '@/lib/whatsapp/account-sync'
 
 // Lazy-initialised service-role client. We need it to detect a
 // phone_number_id already claimed by a *different* user — under RLS,
@@ -336,6 +340,18 @@ export async function POST(request: Request) {
       }
     }
 
+    // Mirror the legacy config into whatsapp_accounts so the new
+    // Accounts UI + provider-based routing see it as a first-class
+    // account. Re-read the row to capture all coexistence fields.
+    const { data: savedConfig } = await supabase
+      .from('whatsapp_config')
+      .select('*')
+      .eq('user_id', user.id)
+      .maybeSingle()
+    if (savedConfig) {
+      await syncLegacyConfigToAccount(savedConfig)
+    }
+
     return NextResponse.json({ success: true, phone_info: phoneInfo })
   } catch (error) {
     console.error('Error in WhatsApp config POST:', error)
@@ -375,6 +391,9 @@ export async function DELETE() {
         { status: 500 }
       )
     }
+
+    // Remove the mirrored account row(s) for this user.
+    await removeAccountForUser(user.id)
 
     return NextResponse.json({ success: true })
   } catch (error) {

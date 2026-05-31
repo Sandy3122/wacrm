@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
 import { getFlowTemplate } from '@/lib/flows/templates'
+import { getRequestWorkspace } from '@/lib/auth/request-context'
+import { can } from '@/lib/auth/rbac'
 
 /**
  * GET /api/flows — list the caller's flows.
@@ -50,6 +52,15 @@ export async function POST(request: Request) {
     return NextResponse.json(guard.body, { status: guard.status })
   }
   const { userId } = guard
+
+  // RBAC: creating/editing flows requires automation.edit (owner/admin).
+  const ws = await getRequestWorkspace()
+  if (ws && !can(ws.role, 'automation.edit')) {
+    return NextResponse.json(
+      { error: 'You do not have permission to create flows' },
+      { status: 403 },
+    )
+  }
 
   const body = (await request.json().catch(() => null)) as
     | {
