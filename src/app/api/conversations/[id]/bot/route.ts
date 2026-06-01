@@ -36,7 +36,6 @@ export async function POST(request: Request, context: RouteContext) {
       .from('conversations')
       .select('id, user_id')
       .eq('id', conversationId)
-      .eq('user_id', user.id)
       .maybeSingle()
 
     if (fetchError || !conversation) {

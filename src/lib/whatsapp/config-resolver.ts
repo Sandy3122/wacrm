@@ -60,13 +60,34 @@ async function getAccountAsConfig(
     .maybeSingle()
 
   if (error || !data) return null
-  if (!data.access_token) return null
 
-  let accessToken: string
-  try {
-    accessToken = decrypt(data.access_token)
-  } catch (err) {
-    console.error('[whatsapp/config] account token decrypt failed:', err)
+  // The downstream webhook pipeline (contacts, conversations, flows) is
+  // still user-scoped, so an account with no owning user can't be
+  // processed. Skip — falls through to legacy config lookup.
+  if (!data.user_id) {
+    console.error(
+      '[whatsapp/config] account has no user_id, cannot route inbound:',
+      data.id,
+    )
+    return null
+  }
+
+  // Meta/coexistence accounts authenticate with access_token; BSP
+  // accounts authenticate with provider_api_key and may leave
+  // access_token null. Accept either — decrypt the access token when
+  // present, otherwise hand back an empty string (BSP webhook paths
+  // resolve the provider from the account row via the accounts
+  // resolver, not from this token).
+  let accessToken = ''
+  if (data.access_token) {
+    try {
+      accessToken = decrypt(data.access_token)
+    } catch (err) {
+      console.error('[whatsapp/config] account token decrypt failed:', err)
+      return null
+    }
+  } else if (!data.provider_api_key) {
+    // No credentials of any kind — unusable.
     return null
   }
 

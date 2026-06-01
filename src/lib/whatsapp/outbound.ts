@@ -98,17 +98,30 @@ async function legacyConfigContext(userId: string): Promise<OutboundContext | nu
     return null
   }
 
-  const provider = new MetaCloudProvider({
-    accountId: config.id,
-    connectionType:
-      config.connection_type === 'coexistence' ? 'coexistence' : 'legacy_cloud_api',
-    providerType: 'meta',
-    phoneNumberId: config.phone_number_id,
-    accessToken,
-    apiKey: null,
-    apiSecret: null,
-    config: null,
-  })
+  const provider = (() => {
+    try {
+      return new MetaCloudProvider({
+        accountId: config.id,
+        connectionType:
+          config.connection_type === 'coexistence'
+            ? 'coexistence'
+            : 'legacy_cloud_api',
+        providerType: 'meta',
+        phoneNumberId: config.phone_number_id,
+        accessToken,
+        apiKey: null,
+        apiSecret: null,
+        config: null,
+      })
+    } catch (err) {
+      console.warn(
+        '[outbound] legacy config provider build failed:',
+        err instanceof Error ? err.message : err,
+      )
+      return null
+    }
+  })()
+  if (!provider) return null
 
   return {
     provider,
@@ -126,20 +139,45 @@ async function legacyConfigContext(userId: string): Promise<OutboundContext | nu
  * can be resolved so callers return a clear 400.
  */
 export async function resolveOutbound(args: ResolveArgs): Promise<OutboundContext> {
+  // Try each candidate in priority order. A candidate that resolves to
+  // a row but fails provider construction (missing token/phone id) must
+  // NOT abort the chain — fall through to the next source so a healthy
+  // legacy config can still serve the send.
+  const safe = (build: () => OutboundContext): OutboundContext | null => {
+    try {
+      return build()
+    } catch (err) {
+      console.warn(
+        '[outbound] candidate unusable, falling through:',
+        err instanceof Error ? err.message : err,
+      )
+      return null
+    }
+  }
+
   // 1) explicit account
   if (args.accountId) {
     const byId = await getAccountById(args.accountId)
-    if (byId) return contextFromResolvedAccount(byId)
+    if (byId) {
+      const ctx = safe(() => contextFromResolvedAccount(byId))
+      if (ctx) return ctx
+    }
   }
   // 2) workspace's account
   if (args.workspaceId) {
     const byWs = await resolveAccountForWorkspace(args.workspaceId)
-    if (byWs) return contextFromResolvedAccount(byWs)
+    if (byWs) {
+      const ctx = safe(() => contextFromResolvedAccount(byWs))
+      if (ctx) return ctx
+    }
   }
   // 3) user's account
   if (args.userId) {
     const byUser = await getAccountForUserId(args.userId)
-    if (byUser) return contextFromResolvedAccount(byUser)
+    if (byUser) {
+      const ctx = safe(() => contextFromResolvedAccount(byUser))
+      if (ctx) return ctx
+    }
     // 4) legacy config fallback
     const legacy = await legacyConfigContext(args.userId)
     if (legacy) return legacy

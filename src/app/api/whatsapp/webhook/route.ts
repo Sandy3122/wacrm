@@ -16,6 +16,8 @@ import {
   ingestRawEvent,
   markEventStatus,
 } from '@/lib/whatsapp/webhook-ingest'
+import { getAccountById } from '@/lib/whatsapp/accounts'
+import { providerForResolvedAccount } from '@/lib/whatsapp/providers/factory'
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -669,9 +671,26 @@ async function processMessage(
     return
   }
 
+  // Build a provider for media verification from the bound account so
+  // BSP inbound media resolves through the right transport. Falls back
+  // to the legacy Meta access token when no account is bound.
+  let mediaProvider: { getMediaUrl: (mediaId: string) => Promise<unknown> } | null =
+    null
+  if (scope.whatsappAccountId) {
+    try {
+      const resolved = await getAccountById(scope.whatsappAccountId)
+      if (resolved) mediaProvider = providerForResolvedAccount(resolved)
+    } catch (err) {
+      console.warn(
+        '[webhook] media provider build failed, using Meta fallback:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+
   // Parse message content based on type
   const { contentText, mediaUrl, mediaType, interactiveReplyId } =
-    await parseMessageContent(message, accessToken)
+    await parseMessageContent(message, accessToken, mediaProvider)
 
   // Resolve swipe-reply context if present. A missing parent is fine —
   // we just store NULL and the UI renders the message without a quote.
@@ -833,7 +852,8 @@ async function processMessage(
 
 async function parseMessageContent(
   message: WhatsAppMessage,
-  accessToken: string
+  accessToken: string,
+  mediaProvider?: { getMediaUrl: (mediaId: string) => Promise<unknown> } | null,
 ): Promise<{
   contentText: string | null
   mediaUrl: string | null
@@ -847,19 +867,23 @@ async function parseMessageContent(
    */
   interactiveReplyId: string | null
 }> {
-  // getMediaUrl signature is (mediaId, accessToken) — earlier code had
-  // the args swapped, so every verification hit an invalid Meta URL and
-  // fell through to the catch block, leaving mediaUrl as null. That's
-  // why images showed up as empty bubbles in the inbox.
+  // Verify the media id resolves (so the inbox proxy URL is only set
+  // when the bytes are actually fetchable), then build the proxy URL.
+  // Uses the account's provider when available (so BSP media works),
+  // falling back to a direct Meta call with the access token.
   const verifyAndBuildUrl = async (
     mediaId: string
   ): Promise<string | null> => {
     try {
-      await getMediaUrl({ mediaId, accessToken })
+      if (mediaProvider) {
+        await mediaProvider.getMediaUrl(mediaId)
+      } else {
+        await getMediaUrl({ mediaId, accessToken })
+      }
       return `/api/whatsapp/media/${mediaId}`
     } catch (error) {
       console.error(
-        `Failed to verify media ${mediaId} with Meta:`,
+        `Failed to verify media ${mediaId}:`,
         error instanceof Error ? error.message : error
       )
       return null

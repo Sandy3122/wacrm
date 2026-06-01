@@ -10,6 +10,7 @@ import {
   validateProviderCredentials,
   presetFor,
 } from '@/lib/whatsapp/providers/validate'
+import { checkResourceLimit } from '@/lib/billing/usage'
 
 /**
  * GET  /api/whatsapp/accounts  — list accounts in the active workspace.
@@ -52,6 +53,25 @@ export async function POST(request: Request) {
     return NextResponse.json(
       { error: 'You do not have permission to connect accounts' },
       { status: 403 },
+    )
+  }
+
+  // Plan enforcement (Sprint 7): cap the number of connected accounts
+  // per organization. Fails open on internal error.
+  const resourceLimit = await checkResourceLimit({
+    organizationId: ctx.organizationId,
+    resource: 'whatsapp_accounts',
+  })
+  if (!resourceLimit.allowed) {
+    return NextResponse.json(
+      {
+        error:
+          resourceLimit.reason ??
+          'WhatsApp account limit reached for your plan. Upgrade to connect more.',
+        limit: resourceLimit.limit,
+        used: resourceLimit.used,
+      },
+      { status: 402 },
     )
   }
 
@@ -128,12 +148,24 @@ export async function POST(request: Request) {
     )
   }
 
+  // Derive the connection_type from the provider preset rather than
+  // trusting the request body — a BSP provider must always be
+  // `bsp_adapter` (so the factory builds the right provider), and Meta
+  // is legacy/coexistence. This prevents a body with provider_type=
+  // '360dialog' + connection_type='legacy_cloud_api' from routing to
+  // the Meta provider and throwing at send time. Coexistence is honored
+  // only for Meta.
+  let effectiveConnectionType = preset?.connectionType ?? connection_type
+  if (provider_type === 'meta' && connection_type === 'coexistence') {
+    effectiveConnectionType = 'coexistence'
+  }
+
   const row = {
     organization_id: ctx.organizationId,
     workspace_id: ctx.workspaceId,
     user_id: ctx.userId,
     name: name || displayPhone || 'WhatsApp Account',
-    connection_type,
+    connection_type: effectiveConnectionType,
     provider_type,
     phone_number_id: phone_number_id ?? null,
     waba_id: waba_id ?? null,
@@ -166,7 +198,7 @@ export async function POST(request: Request) {
     action: 'connection.created',
     targetType: 'whatsapp_account',
     targetId: created.id,
-    metadata: { provider_type, connection_type },
+    metadata: { provider_type, connection_type: effectiveConnectionType },
   })
 
   return NextResponse.json({

@@ -33,6 +33,12 @@ export async function POST(request: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   // RBAC: editing automations requires automation.edit (owner/admin).
+  // When `ws` is null (legacy single-user install, or a user whose
+  // workspace couldn't be resolved) we allow — the insert is scoped to
+  // `user_id: user.id` and the auto-scope trigger binds the row to that
+  // user's own default workspace where they are always owner, so this
+  // can never write into another tenant's workspace. The role gate only
+  // bites for genuine non-owner members of a shared workspace.
   const ws = await getRequestWorkspace()
   if (ws && !can(ws.role, 'automation.edit')) {
     return NextResponse.json(
