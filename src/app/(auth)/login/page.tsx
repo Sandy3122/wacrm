@@ -4,17 +4,21 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { siteConfig } from "@/lib/marketing/config";
+import { AuthShell } from "@/components/auth/auth-shell";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { MessageSquare } from "lucide-react";
+  AuthAlert,
+  AuthField,
+  AuthInfo,
+  AuthInput,
+  AuthPasswordInput,
+  AuthSubmit,
+} from "@/components/auth/auth-form";
+
+// Reviewer-friendly note for Meta App Review. Never renders credentials.
+const showReviewerNote =
+  process.env.NODE_ENV !== "production" ||
+  process.env.NEXT_PUBLIC_REVIEW_MODE === "true";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -29,10 +33,7 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
 
     if (error) {
       setError(error.message);
@@ -44,83 +45,77 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4">
-      <Card className="w-full max-w-md border-slate-800 bg-slate-900">
-        <CardHeader className="items-center text-center">
-          <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-            <MessageSquare className="h-6 w-6 text-primary" />
-          </div>
-          <CardTitle className="text-xl text-white">Welcome back</CardTitle>
-          <CardDescription className="text-slate-400">
-            Sign in to your account
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleLogin} className="flex flex-col gap-4">
-            {error && (
-              <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-                {error}
-              </div>
-            )}
+    <AuthShell
+      eyebrow="Welcome back"
+      title="Sign in to your workspace"
+      description={`Access your ${siteConfig.name} inbox, automations, and customer conversations.`}
+      footer={
+        <p className="text-center text-sm text-[#64748B]">
+          Don&apos;t have an account?{" "}
+          <Link href="/signup" className="font-semibold text-[#2563EB] hover:underline">
+            Create an account
+          </Link>
+        </p>
+      }
+    >
+      <form onSubmit={handleLogin} className="flex flex-col gap-5" noValidate>
+        {showReviewerNote ? (
+          <AuthInfo>
+            Meta reviewers can use the provided test account credentials from the App Review
+            instructions.
+          </AuthInfo>
+        ) : null}
+        {error ? <AuthAlert>{error}</AuthAlert> : null}
 
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="email" className="text-slate-300">
-                Email
-              </Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 focus-visible:border-primary focus-visible:ring-primary/20"
-              />
-            </div>
+        <AuthField label="Email address" htmlFor="email">
+          <AuthInput
+            id="email"
+            type="email"
+            autoComplete="email"
+            placeholder="you@company.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </AuthField>
 
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="password" className="text-slate-300">
-                  Password
-                </Label>
-                <Link
-                  href="/forgot-password"
-                  className="text-sm text-primary hover:text-primary/80"
-                >
-                  Forgot password?
-                </Link>
-              </div>
-              <Input
-                id="password"
-                type="password"
-                placeholder="Enter your password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 focus-visible:border-primary focus-visible:ring-primary/20"
-              />
-            </div>
-
-            <Button
-              type="submit"
-              disabled={loading}
-              className="mt-2 h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              {loading ? "Signing in..." : "Sign in"}
-            </Button>
-          </form>
-
-          <p className="mt-6 text-center text-sm text-slate-400">
-            Don&apos;t have an account?{" "}
+        <AuthField
+          label="Password"
+          htmlFor="password"
+          labelAction={
             <Link
-              href="/signup"
-              className="text-primary hover:text-primary/80"
+              href="/forgot-password"
+              className="text-sm font-medium text-[#2563EB] hover:underline"
             >
-              Create account
+              Forgot password?
             </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
+          }
+        >
+          <AuthPasswordInput
+            id="password"
+            autoComplete="current-password"
+            placeholder="Enter your password"
+            value={password}
+            onChange={setPassword}
+            required
+          />
+        </AuthField>
+
+        <label htmlFor="remember" className="flex items-center gap-2.5 text-sm text-[#64748B]">
+          <input
+            id="remember"
+            name="remember"
+            type="checkbox"
+            defaultChecked
+            className="h-4 w-4 rounded border-[#CBD5E1] text-[#2563EB] focus:ring-[#2563EB]"
+          />
+          Keep me signed in on this device
+        </label>
+
+        <AuthSubmit loading={loading} loadingLabel="Signing in…">
+          Sign in
+        </AuthSubmit>
+      </form>
+    </AuthShell>
   );
 }

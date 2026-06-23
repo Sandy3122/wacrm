@@ -2,18 +2,16 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { ArrowLeft, CheckCircle2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { AuthShell } from "@/components/auth/auth-shell";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { MessageSquare, CheckCircle, ArrowLeft } from "lucide-react";
+  AuthAlert,
+  AuthField,
+  AuthInput,
+  AuthSubmit,
+} from "@/components/auth/auth-form";
+import { CtaButton } from "@/components/marketing/cta-button";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
@@ -41,91 +39,66 @@ export default function ForgotPasswordPage() {
     setLoading(false);
   };
 
-  if (success) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4">
-        <Card className="w-full max-w-md border-slate-800 bg-slate-900">
-          <CardHeader className="items-center text-center">
-            <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-              <CheckCircle className="h-6 w-6 text-primary" />
-            </div>
-            <CardTitle className="text-xl text-white">
-              Check your email
-            </CardTitle>
-            <CardDescription className="text-slate-400">
-              We&apos;ve sent a password reset link to{" "}
-              <span className="text-white">{email}</span>. Please check your
-              inbox.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Link href="/login">
-              <Button
-                variant="outline"
-                className="w-full border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-white"
-              >
-                Back to sign in
-              </Button>
-            </Link>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4">
-      <Card className="w-full max-w-md border-slate-800 bg-slate-900">
-        <CardHeader className="items-center text-center">
-          <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-            <MessageSquare className="h-6 w-6 text-primary" />
-          </div>
-          <CardTitle className="text-xl text-white">Reset password</CardTitle>
-          <CardDescription className="text-slate-400">
-            Enter your email and we&apos;ll send you a reset link
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleReset} className="flex flex-col gap-4">
-            {error && (
-              <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-                {error}
-              </div>
-            )}
-
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="email" className="text-slate-300">
-                Email
-              </Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 focus-visible:border-primary focus-visible:ring-primary/20"
-              />
+    <AuthShell
+      eyebrow="Account recovery"
+      title={success ? "Check your email" : "Reset your password"}
+      description={
+        success
+          ? "Follow the link in your inbox to choose a new password."
+          : "Enter the email on your account and we'll send a secure reset link."
+      }
+      footer={
+        <Link
+          href="/login"
+          className="flex items-center justify-center gap-2 text-sm font-medium text-[#64748B] hover:text-[#2563EB]"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+          Back to sign in
+        </Link>
+      }
+    >
+      {success ? (
+        <div className="flex flex-col gap-6">
+          <div className="flex items-start gap-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-5">
+            <span className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#DCFCE7]">
+              <CheckCircle2 className="h-5 w-5 text-[#16A34A]" aria-hidden="true" />
+            </span>
+            <div>
+              <p className="text-sm font-semibold text-[#081426]">Reset link sent</p>
+              <p className="mt-1 text-sm text-[#64748B]">
+                We&apos;ve emailed a link to{" "}
+                <span className="font-medium text-[#0F172A]">{email}</span>. Check your spam
+                folder if it doesn&apos;t arrive within a few minutes.
+              </p>
             </div>
+          </div>
 
-            <Button
-              type="submit"
-              disabled={loading}
-              className="mt-2 h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              {loading ? "Sending..." : "Send reset link"}
-            </Button>
-          </form>
+          <CtaButton href="/login" variant="secondary" size="md" className="w-full">
+            Return to sign in
+          </CtaButton>
+        </div>
+      ) : (
+        <form onSubmit={handleReset} className="flex flex-col gap-5" noValidate>
+          {error ? <AuthAlert>{error}</AuthAlert> : null}
 
-          <Link
-            href="/login"
-            className="mt-6 flex items-center justify-center gap-2 text-sm text-slate-400 hover:text-slate-300"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            Back to sign in
-          </Link>
-        </CardContent>
-      </Card>
-    </div>
+          <AuthField label="Email address" htmlFor="email">
+            <AuthInput
+              id="email"
+              type="email"
+              autoComplete="email"
+              placeholder="you@company.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </AuthField>
+
+          <AuthSubmit loading={loading} loadingLabel="Sending…">
+            Send reset link
+          </AuthSubmit>
+        </form>
+      )}
+    </AuthShell>
   );
 }
