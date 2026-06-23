@@ -27,7 +27,42 @@ export function createClient() {
   }
 
   browserClient = createBrowserClient(env.url, env.key)
+  bindRealtimeAuth(browserClient)
   return browserClient
+}
+
+// Set once so we register the realtime-auth listener a single time for
+// the singleton client, even though createClient() is called from many
+// components.
+let realtimeAuthBound = false
+
+/**
+ * Keep the Realtime websocket's JWT in lock-step with the auth session
+ * for the WHOLE lifetime of the client — not just at subscribe time.
+ *
+ * `postgres_changes` enforces RLS using the token attached to the
+ * socket. supabase-js only auto-pushes the token to Realtime on
+ * `SIGNED_IN` / `TOKEN_REFRESHED` — NOT on `INITIAL_SESSION`, which is
+ * the event that fires on a normal page load with a restored cookie
+ * session. Without this, a channel that joins on first paint rides the
+ * anon key, `auth.uid()` is NULL, RLS filters every row, and the
+ * subscription stays silently dead for the session while REST keeps
+ * working — the "messages only show after a manual refresh" bug.
+ *
+ * Binding to `onAuthStateChange` here covers every transition
+ * (INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED, SIGNED_OUT) so the
+ * socket is authenticated regardless of subscribe timing and re-auths
+ * itself when the hourly token rotation happens.
+ */
+function bindRealtimeAuth(client: SupabaseClient) {
+  if (realtimeAuthBound || typeof window === 'undefined') return
+  if (!client.auth || !client.realtime) return
+  realtimeAuthBound = true
+
+  client.auth.onAuthStateChange((_event, session) => {
+    // setAuth(undefined) on sign-out drops the socket back to anon.
+    void client.realtime.setAuth(session?.access_token)
+  })
 }
 
 /**
