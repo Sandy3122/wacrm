@@ -153,10 +153,13 @@ export async function GET(request: Request) {
       if (!account.verify_token) continue
       try {
         if (decrypt(account.verify_token) === verifyToken) {
-          void supabaseAdmin()
+          supabaseAdmin()
             .from('whatsapp_accounts')
             .update({ webhook_status: 'verified' })
             .eq('id', account.id)
+            .then(({ error }: { error: unknown }) => {
+              if (error) console.warn('[webhook] failed to mark account verified:', error)
+            })
           return new Response(challenge, {
             status: 200,
             headers: { 'Content-Type': 'text/plain' },
@@ -205,6 +208,9 @@ export async function GET(request: Request) {
         .from('whatsapp_config')
         .update({ webhook_status: 'verified' })
         .eq('id', matchedConfig.id)
+        .then(({ error }: { error: unknown }) => {
+          if (error) console.warn('[webhook] failed to mark config verified:', error)
+        })
       return new Response(challenge, {
         status: 200,
         headers: { 'Content-Type': 'text/plain' },
