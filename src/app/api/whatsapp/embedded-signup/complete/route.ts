@@ -7,6 +7,7 @@ import {
   fetchPhoneCoexistenceInfo,
   fetchWabaPhoneNumbers,
   subscribeAppToWaba,
+  ensureWebhookFieldSubscriptions,
 } from '@/lib/whatsapp/embedded-signup-meta'
 import { randomBytes } from 'crypto'
 import { syncLegacyConfigToAccount } from '@/lib/whatsapp/account-sync'
@@ -95,6 +96,11 @@ export async function POST(request: Request) {
         console.warn('[embedded-signup] WABA subscribe warning:', err)
       }
     }
+
+    // Best-effort: ensure the app-level webhook subscription carries
+    // `messages` + `statuses` so status tracking and inbox work without
+    // manual configuration in the Meta App Dashboard.
+    void ensureWebhookFieldSubscriptions()
 
     const admin = supabaseAdmin()
 
