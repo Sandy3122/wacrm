@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { supabaseAdmin } from '@/lib/flows/admin-client'
 import {
   sanitizePhoneForMeta,
   isValidE164,
@@ -15,6 +14,11 @@ import {
 import { getRequestWorkspace } from '@/lib/auth/request-context'
 import { checkUsageLimit, recordUsage } from '@/lib/billing/usage'
 import { resolveOutbound } from '@/lib/whatsapp/outbound'
+import {
+  pauseActiveFlowRunsForContact,
+  resolveBotPauseSettings,
+  pauseConversationBot,
+} from '@/lib/whatsapp/pause-flows'
 
 export async function POST(request: Request) {
   try {
@@ -292,29 +296,29 @@ export async function POST(request: Request) {
       })
       .eq('id', conversation_id)
 
-    // Pause any active Flow run for this contact — the agent stepping
-    // in is the strongest "yield, human is here" signal. See PR #2
-    // plan for why we pause (not end): preserves diagnostic state +
-    // lets the agent or the 24h timeout sweep cleanly resolve the
-    // run later. For accounts with no active runs the UPDATE matches
-    // zero rows — cheap and harmless.
+    // Human takeover: the agent stepping in is the strongest "yield,
+    // human is here" signal. Pause two things, consistent with the
+    // Business-App echo path (src/lib/whatsapp/webhook-echo.ts):
+    //
+    //   1. Active Flow runs for this contact — paused (not ended) to
+    //      preserve diagnostic state; the 24h stale-run sweep resolves
+    //      them if the agent never returns.
+    //   2. The conversation bot — so the NEXT inbound customer message
+    //      doesn't re-fire keyword/message automations while the human
+    //      is handling the thread. Governed by the account's
+    //      pause_bot_on_app_reply toggle; the webhook auto-resumes via
+    //      resumeBotIfPauseExpired once the window expires.
+    //
+    // Best-effort — the message already landed at Meta, so a bookkeeping
+    // miss here must not fail the response.
     try {
-      const { error: pauseErr } = await supabaseAdmin()
-        .from('flow_runs')
-        .update({
-          status: 'paused_by_agent',
-          ended_at: new Date().toISOString(),
-          end_reason: 'agent_replied',
-        })
-        .eq('user_id', user.id)
-        .eq('contact_id', contact.id)
-        .eq('status', 'active')
-      if (pauseErr) {
-        // Best-effort — log + continue. The agent's message already
-        // landed at Meta; don't fail the response over a bookkeeping
-        // miss. Worst case: a stale active run gets caught by the
-        // stale-run cron sweep within 24h.
-        console.error('[flows] pause-on-agent-send failed:', pauseErr.message)
+      await pauseActiveFlowRunsForContact(user.id, contact.id, 'agent_replied')
+      const pause = await resolveBotPauseSettings({
+        accountId: outbound.accountId,
+        userId: user.id,
+      })
+      if (pause.pauseEnabled) {
+        await pauseConversationBot(conversation_id, pause.hours)
       }
     } catch (err) {
       console.error(

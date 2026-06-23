@@ -37,8 +37,13 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:push": "supabase db push",
-    "db:migration:list": "supabase migration list --linked"
+    "db:migrate": "bash scripts/db-migrate.sh migrate",
+    "db:migration:status": "bash scripts/db-migrate.sh status",
+    "db:migration:new": "supabase migration new",
+    "db:push": "bash scripts/db-migrate.sh migrate",
+    "db:setup": "bash scripts/db-migrate.sh migrate",
+    "db:migration:list": "bash scripts/db-migrate.sh status",
+    "db:link": "supabase link"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

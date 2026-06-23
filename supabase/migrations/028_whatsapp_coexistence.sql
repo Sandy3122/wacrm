@@ -1,5 +1,10 @@
 -- WhatsApp Coexistence: extend existing tables for connection modes,
 -- bot pause, message source tracking, and webhook debugging.
+--
+-- Renumbered from 014 → 028 because 014 is already used by
+-- 014_message_templates_meta_integration.sql on remote.
+
+SET search_path TO public, extensions;
 
 -- ============================================================
 -- WHATSAPP_CONFIG

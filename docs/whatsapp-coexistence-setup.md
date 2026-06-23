@@ -47,7 +47,18 @@ In your Embedded Signup launch code (WACRM settings UI does this automatically):
 
 Customers must choose **Connect WhatsApp Business App**, not standard Cloud API migration.
 
-### 4. Subscribe webhook fields
+### 4. OAuth redirect URI (required)
+
+Add these in **Meta App → Facebook Login → Settings → Valid OAuth Redirect URIs**:
+
+```
+http://localhost:3000/settings/whatsapp/embedded-signup/callback
+https://your-production-domain/settings/whatsapp/embedded-signup/callback
+```
+
+WACRM uses a **full-page OAuth redirect** (not `FB.login` / Facebook JS SDK). `http://localhost` works in development. Plain HTTP on LAN IPs or production requires HTTPS or a tunnel (e.g. ngrok).
+
+### 5. Subscribe webhook fields
 
 In **Meta App Dashboard → WhatsApp → Configuration → Webhooks**, subscribe:
 
@@ -62,7 +73,7 @@ In **Meta App Dashboard → WhatsApp → Configuration → Webhooks**, subscribe
 Callback URL: `https://your-domain.com/api/whatsapp/webhook`  
 Verify token: same string saved in WACRM WhatsApp settings.
 
-### 5. Connect in WACRM
+### 6. Connect in WACRM
 
 1. **Settings → WhatsApp Config**
 2. Select **Coexistence — WhatsApp Business App + API**
@@ -70,7 +81,7 @@ Verify token: same string saved in WACRM WhatsApp settings.
 4. Complete Meta login; keep the Business App open during sync
 5. Confirm badges: connection type, webhook status, app sync
 
-### 6. Post-onboarding
+### 7. Post-onboarding
 
 - History sync must finish within **24 hours** or the customer may need to re-onboard.
 - Verify coexistence: `GET /{phone_number_id}?fields=is_on_biz_app,platform_type` should show the number on the Business App.
@@ -103,7 +114,7 @@ Runtime behavior (sending, echoes, bot pause) is identical once credentials are 
 | Customer inbound message | Saved; flows/automations run if bot **active** and not assigned to human |
 | API/bot reply | Sent via Graph API; stored with source **API** |
 | Reply from Business App | `smb_message_echoes` webhook; stored as **WhatsApp Business App**; bot paused (default 24h) |
-| CRM agent reply | Source **API**; active flows paused |
+| CRM agent reply | Source **API**; active flows paused **and** conversation bot paused (default 24h, governed by *Pause bot when human replies*) |
 
 Settings (Coexistence section):
 
@@ -136,6 +147,7 @@ Settings (Coexistence section):
 | Business App replies not in inbox | `smb_message_echoes` subscribed; webhook signature valid |
 | Bot still auto-replies after human reply | `pause_bot_on_app_reply` enabled; echo handler receiving events |
 | Embedded Signup button disabled | `NEXT_PUBLIC_META_APP_ID` and `NEXT_PUBLIC_META_EMBEDDED_SIGNUP_CONFIG_ID` set |
+| `FB.login` / HTTPS error | Use `http://localhost:3000` in dev, or HTTPS in production; add OAuth redirect URI above |
 | Token decrypt errors | `ENCRYPTION_KEY` consistent across environments |
 
 See [Meta: Onboard Business app users](https://developers.facebook.com/docs/whatsapp/embedded-signup/custom-flows/onboarding-business-app-users/).

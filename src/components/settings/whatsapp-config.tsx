@@ -65,7 +65,8 @@ export function WhatsAppConfig() {
   const [webhookStatus, setWebhookStatus] = useState<string>('pending');
   const [connectingSignup, setConnectingSignup] = useState(false);
 
-  const { launchEmbeddedSignup, canLaunch } = useEmbeddedSignup();
+  const { startEmbeddedSignupRedirect, connecting, canLaunch, originBlocked, originError, callbackPath } =
+    useEmbeddedSignup();
 
   const webhookUrl =
     typeof window !== 'undefined'
@@ -150,6 +151,14 @@ export function WhatsAppConfig() {
     }
     fetchConfig(user.id);
   }, [authLoading, user, fetchConfig]);
+
+  useEffect(() => {
+    const token = sessionStorage.getItem('wa_embedded_signup_verify_token');
+    if (token) {
+      setVerifyToken(token);
+      sessionStorage.removeItem('wa_embedded_signup_verify_token');
+    }
+  }, []);
 
   async function handleSave() {
     if (!phoneNumberId.trim()) {
@@ -289,33 +298,10 @@ export function WhatsAppConfig() {
   async function handleConnectCoexistence() {
     try {
       setConnectingSignup(true);
-      const { code, session } = await launchEmbeddedSignup();
-      const res = await fetch('/api/whatsapp/embedded-signup/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          code,
-          waba_id: session.waba_id,
-          phone_number_id: session.phone_number_id,
-          business_id: session.business_id,
-          display_phone_number: session.display_phone_number,
-          event: session.event,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        toast.error(data.error || 'Embedded Signup failed');
-        return;
-      }
-      toast.success('WhatsApp Business App connected via Coexistence');
-      if (data.verify_token) {
-        setVerifyToken(data.verify_token);
-      }
-      if (user) await fetchConfig(user.id);
+      startEmbeddedSignupRedirect();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Embedded Signup failed';
       toast.error(message);
-    } finally {
       setConnectingSignup(false);
     }
   }
@@ -428,11 +414,23 @@ export function WhatsAppConfig() {
                 <AlertDescription className="text-blue-100/90 text-sm space-y-2">
                   <p>Keep WhatsApp Business App installed (v2.24.17+). Do not delete it.</p>
                   <p>Choose <strong>Connect WhatsApp Business App</strong> in Meta&apos;s flow, not standard migration.</p>
+                  <p className="text-xs text-slate-400">
+                    Add this OAuth redirect URI in Meta App → Facebook Login → Settings → Valid OAuth Redirect URIs:
+                    <br />
+                    <code className="text-slate-300">
+                      {typeof window !== 'undefined'
+                        ? `${window.location.origin}${callbackPath}`
+                        : 'https://your-domain/settings/whatsapp/embedded-signup/callback'}
+                    </code>
+                  </p>
+                  {originBlocked && originError ? (
+                    <p className="text-amber-200/90 text-xs">{originError}</p>
+                  ) : null}
                   {canLaunch ? (
                     <Button
                       type="button"
                       onClick={handleConnectCoexistence}
-                      disabled={connectingSignup}
+                      disabled={connectingSignup || connecting}
                       className="mt-2 bg-primary hover:bg-primary/90"
                     >
                       {connectingSignup ? (
@@ -578,7 +576,7 @@ export function WhatsAppConfig() {
                   onChange={(e) => setPauseBotOnAppReply(e.target.checked)}
                   className="rounded border-slate-600"
                 />
-                Pause bot when human replies from Business App
+                Pause bot when a human replies (Business App or CRM)
               </label>
               <div className="space-y-2">
                 <Label className="text-slate-300">Pause duration (hours)</Label>

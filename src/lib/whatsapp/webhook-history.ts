@@ -41,6 +41,11 @@ export async function processHistorySync(args: {
   const { value, config } = args
   const userId = config.user_id
   const histories = value.history ?? []
+  const scope = {
+    workspaceId: (config.workspace_id as string | null) ?? null,
+    organizationId: (config.organization_id as string | null) ?? null,
+  }
+  const whatsappAccountId = (config.whatsapp_account_id as string | null) ?? null
 
   for (const chunk of histories) {
     const messages = chunk.messages ?? []
@@ -49,16 +54,26 @@ export async function processHistorySync(args: {
 
       const isInbound = msg.from !== config.display_phone_number
       const customerPhone = normalizePhone(isInbound ? msg.from : (msg.to ?? msg.from))
-      const contactOutcome = await findOrCreateContact(userId, customerPhone, customerPhone)
+      const contactOutcome = await findOrCreateContact(
+        userId,
+        customerPhone,
+        customerPhone,
+        scope,
+      )
       if (!contactOutcome) continue
 
-      const conversation = await findOrCreateConversation(userId, contactOutcome.contact.id)
+      const conversation = await findOrCreateConversation(
+        userId,
+        contactOutcome.contact.id,
+        { ...scope, whatsappAccountId, customerWaId: customerPhone },
+      )
       if (!conversation) continue
 
       const contentText = msg.text?.body ?? `[${msg.type ?? 'message'}]`
 
       const { error } = await supabaseAdmin().from('messages').insert({
         conversation_id: conversation.id,
+        whatsapp_account_id: whatsappAccountId,
         sender_type: isInbound ? 'customer' : 'agent',
         content_type: 'text',
         content_text: contentText,
@@ -78,10 +93,20 @@ export async function processHistorySync(args: {
     }
   }
 
-  await supabaseAdmin()
-    .from('whatsapp_config')
-    .update({ history_sync_status: 'complete' })
-    .eq('id', config.id)
+  // The config id may belong to either whatsapp_accounts (new model) or
+  // whatsapp_config (legacy). Update both — the non-matching one is a
+  // cheap no-op — so the coexistence onboarding badge reflects 'complete'
+  // regardless of which table the account was resolved from.
+  await Promise.all([
+    supabaseAdmin()
+      .from('whatsapp_accounts')
+      .update({ history_sync_status: 'complete' })
+      .eq('id', config.id),
+    supabaseAdmin()
+      .from('whatsapp_config')
+      .update({ history_sync_status: 'complete' })
+      .eq('id', config.id),
+  ])
 }
 
 interface SmbContactSync {
@@ -106,6 +131,10 @@ export async function processSmbAppStateSync(args: {
   const { value, config } = args
   const userId = config.user_id
   const items = value.state_sync ?? []
+  const scope = {
+    workspaceId: (config.workspace_id as string | null) ?? null,
+    organizationId: (config.organization_id as string | null) ?? null,
+  }
 
   for (const item of items) {
     if (item.type !== 'contact' || !item.contact?.phone_number) continue
@@ -115,6 +144,6 @@ export async function processSmbAppStateSync(args: {
       item.contact.first_name ??
       phone
 
-    await findOrCreateContact(userId, phone, name)
+    await findOrCreateContact(userId, phone, name, scope)
   }
 }

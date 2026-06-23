@@ -12,6 +12,25 @@
 
 SET search_path TO public, extensions;
 
+-- Coexistence columns on whatsapp_config (also in 028_whatsapp_coexistence.sql;
+-- duplicated here so 020 can read them before 028 runs on fresh installs).
+ALTER TABLE whatsapp_config
+  ADD COLUMN IF NOT EXISTS connection_type TEXT NOT NULL DEFAULT 'legacy'
+    CHECK (connection_type IN ('legacy', 'coexistence')),
+  ADD COLUMN IF NOT EXISTS business_id TEXT,
+  ADD COLUMN IF NOT EXISTS display_phone_number TEXT,
+  ADD COLUMN IF NOT EXISTS webhook_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (webhook_status IN ('pending', 'verified', 'error')),
+  ADD COLUMN IF NOT EXISTS app_sync_enabled BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS pause_bot_on_app_reply BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS bot_pause_duration_hours INTEGER NOT NULL DEFAULT 24,
+  ADD COLUMN IF NOT EXISTS automation_outside_hours BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS fallback_message TEXT,
+  ADD COLUMN IF NOT EXISTS coexistence_onboarded_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS history_sync_status TEXT DEFAULT 'pending'
+    CHECK (history_sync_status IN ('pending', 'complete', 'failed')),
+  ADD COLUMN IF NOT EXISTS last_webhook_at TIMESTAMPTZ;
+
 -- 1) whatsapp_config → whatsapp_accounts
 INSERT INTO whatsapp_accounts (
   organization_id, workspace_id, user_id, name,
