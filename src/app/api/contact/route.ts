@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server"
+import nodemailer from "nodemailer"
 
 /**
  * POST /api/contact — public contact / enquiry endpoint.
@@ -112,17 +113,30 @@ type Enquiry = {
 }
 
 /**
- * Delivers an enquiry. Uses Resend if RESEND_API_KEY + CONTACT_TO_EMAIL
- * are configured (no SDK dependency — a plain fetch to their REST API).
- * Otherwise it logs the enquiry server-side and resolves successfully,
- * so the form remains functional without email configured.
+ * Delivers an enquiry via Nodemailer (SMTP transport).
+ * Required env:
+ * - CONTACT_TO_EMAIL
+ * - SMTP_HOST
+ * - SMTP_PORT
+ * - SMTP_USER
+ * - SMTP_PASS
+ * Optional env:
+ * - SMTP_SECURE (true/false)
+ * - CONTACT_FROM_EMAIL
+ *
+ * If email delivery is not configured, we log and resolve successfully
+ * so the public form still works in review/demo environments.
  */
 async function deliverEnquiry(enquiry: Enquiry): Promise<void> {
-  const apiKey = process.env.RESEND_API_KEY
   const to = process.env.CONTACT_TO_EMAIL
-  const from = process.env.CONTACT_FROM_EMAIL ?? "Softivum Connect <onboarding@resend.dev>"
+  const from = process.env.CONTACT_FROM_EMAIL ?? "Softivum Connect <no-reply@softivum.com>"
+  const host = process.env.SMTP_HOST
+  const port = Number(process.env.SMTP_PORT ?? 587)
+  const user = process.env.SMTP_USER
+  const pass = process.env.SMTP_PASS
+  const secure = process.env.SMTP_SECURE === "true"
 
-  if (!apiKey || !to) {
+  if (!to || !host || !Number.isFinite(port) || !user || !pass) {
     console.info("[contact] enquiry received (email not configured):", {
       from: enquiry.email,
       company: enquiry.company,
@@ -143,22 +157,18 @@ async function deliverEnquiry(enquiry: Enquiry): Promise<void> {
     enquiry.message,
   ]
 
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from,
-      to: [to],
-      reply_to: enquiry.email,
-      subject: `New Softivum Connect enquiry from ${enquiry.fullName}`,
-      text: lines.join("\n"),
-    }),
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
   })
 
-  if (!res.ok) {
-    throw new Error(`Resend responded ${res.status}`)
-  }
+  await transporter.sendMail({
+    from,
+    to,
+    replyTo: enquiry.email,
+    subject: `New Softivum Connect enquiry from ${enquiry.fullName}`,
+    text: lines.join("\n"),
+  })
 }
