@@ -11,6 +11,7 @@ Coexistence lets a business keep using the **WhatsApp Business App** on their ph
 
 ---
 
+
 ## Path A — First-party Embedded Signup (Meta Partner)
 
 ### 1. Become eligible
