@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl } from '@/lib/whatsapp/meta-api'
@@ -33,6 +33,12 @@ import {
   findOrCreateConversation,
   resumeBotIfPauseExpired,
 } from '@/lib/whatsapp/webhook-contact'
+
+// Give the post-response `after()` work (media verification, automation
+// + flow dispatch) headroom beyond the default function timeout. Vercel
+// caps this to the plan's max; the GET verification path returns long
+// before this matters.
+export const maxDuration = 60
 
 // Lazy-initialized to avoid build-time crash when env vars are missing
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -261,9 +267,19 @@ export async function POST(request: Request) {
     return rateLimitResponse(limit)
   }
 
-  // Process asynchronously so we can ack Meta within their timeout.
-  processWebhook(body).catch((error) => {
-    console.error('Error processing webhook:', error)
+  // Process AFTER the 200 ack so we stay within Meta's webhook timeout,
+  // but via `after()` — NOT bare fire-and-forget. On Vercel the
+  // serverless function is frozen the instant the response is sent, so a
+  // un-awaited `processWebhook(body)` was being killed mid-flight: Meta
+  // got its 200 (double tick on the sender's phone) while the message
+  // never reached the database. `after()` keeps the function alive (it
+  // uses the platform's waitUntil) until processing resolves.
+  after(async () => {
+    try {
+      await processWebhook(body)
+    } catch (error) {
+      console.error('Error processing webhook:', error)
+    }
   })
 
   return NextResponse.json({ status: 'received' }, { status: 200 })

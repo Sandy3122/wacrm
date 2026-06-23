@@ -70,6 +70,10 @@ export default function RootLayout({
       lang="en"
       data-theme={DEFAULT_THEME}
       className={`${inter.variable} h-full antialiased`}
+      // The theme-boot script rewrites `data-theme` from the stored
+      // preference before React hydrates, so the server value
+      // (DEFAULT_THEME) legitimately differs from the client DOM.
+      suppressHydrationWarning
     >
       <head>
         <Script
@@ -78,7 +82,14 @@ export default function RootLayout({
           dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }}
         />
       </head>
-      <body className="min-h-full bg-background text-foreground font-sans">
+      <body
+        className="min-h-full bg-background text-foreground font-sans"
+        // Browser extensions (e.g. ColorZilla's `cz-shortcut-listen`,
+        // Grammarly) inject attributes onto <body> before hydration.
+        // Suppress only this element's attribute diff — children still
+        // surface real mismatches.
+        suppressHydrationWarning
+      >
         <ThemeProvider>
           {children}
           <Toaster

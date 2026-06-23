@@ -93,7 +93,38 @@ In **Supabase Dashboard → Project Settings → Database**:
 
 1. Confirm the project is **not paused** (free tier inactivity).
 2. Under **Network restrictions**, allow your IP or disable restrictions temporarily.
-3. Retry `npm run db:setup`.
+3. Retry `npm run db:migrate`.
+
+### `no route to host` / IPv6 errors
+
+Direct host `db.<project-ref>.supabase.co` may resolve to **IPv6 only**. If your network has no working IPv6 route, use the **Session pooler** (IPv4) instead:
+
+1. Dashboard → **Project Settings → Database → Connection string**
+2. Choose **Session pooler** and copy the URI, **or** note the region (e.g. `ap-south-1`)
+3. Add to `.env.local` either:
+
+```bash
+SUPABASE_DB_REGION=ap-south-1
+```
+
+or the full URI:
+
+```bash
+SUPABASE_DB_URL=postgresql://postgres.<project-ref>:<password>@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+```
+
+(URL-encode special characters in the password.)
+
+### Supabase CLI not found
+
+The CLI is a project dev dependency — use `npx`, not a global install:
+
+```bash
+npx supabase login
+npx supabase migration list --help
+```
+
+Migration scripts already call `npx supabase` via `npm run db:migrate`.
 
 ## 5. Fresh project checklist
 
@@ -112,3 +143,5 @@ After migrations apply:
 | CLI project ≠ `.env.local` URL | Align link or env (see step 1) |
 | `uuid_generate_v4() does not exist` | Use `extensions.uuid_generate_v4()` in new migrations (fixed in `014_whatsapp_coexistence.sql`) |
 | Auth/login fails in app | Set `NEXT_PUBLIC_SUPABASE_ANON_KEY` (not only publishable key) |
+| `no route to host` on migrate | Set `SUPABASE_DB_REGION` or `SUPABASE_DB_URL` (session pooler) — see step 4 |
+| `supabase: command not found` | Use `npx supabase` (CLI is installed in the project) |

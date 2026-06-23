@@ -12,8 +12,13 @@
 #   npm run db:migrate                  # apply pending migrations
 #   npm run db:migration:status         # list local vs remote
 #
-# Optional override:
-#   SUPABASE_DB_URL=postgresql://postgres:...@db.<ref>.supabase.co:5432/postgres
+# Optional overrides (use when direct db.<ref>.supabase.co fails — e.g. IPv6
+# "no route to host" on your network):
+#   SUPABASE_DB_REGION=ap-south-1
+#     → session pooler at aws-0-<region>.pooler.supabase.com (IPv4-friendly)
+#   SUPABASE_DB_POOLER_HOST=aws-1-ap-south-1.pooler.supabase.com
+#     → override pooler hostname from Dashboard if it differs from aws-0-*
+#   SUPABASE_DB_URL=postgresql://postgres.<ref>:PASSWORD@aws-0-<region>.pooler.supabase.com:5432/postgres
 
 set -euo pipefail
 
@@ -63,6 +68,12 @@ fi
 
 if [[ -n "${SUPABASE_DB_URL:-}" ]]; then
   DB_URL="$SUPABASE_DB_URL"
+elif [[ -n "${SUPABASE_DB_REGION:-}" ]]; then
+  ENCODED_PASSWORD="$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['SUPABASE_DB_PASSWORD'], safe=''))")"
+  POOLER_HOST="${SUPABASE_DB_POOLER_HOST:-aws-0-${SUPABASE_DB_REGION}.pooler.supabase.com}"
+  DB_URL="postgresql://postgres.${PROJECT_REF}:${ENCODED_PASSWORD}@${POOLER_HOST}:5432/postgres"
+  echo "Using session pooler: ${POOLER_HOST}"
+  echo ""
 else
   ENCODED_PASSWORD="$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['SUPABASE_DB_PASSWORD'], safe=''))")"
   DB_URL="postgresql://postgres:${ENCODED_PASSWORD}@db.${PROJECT_REF}.supabase.co:5432/postgres"

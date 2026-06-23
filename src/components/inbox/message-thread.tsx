@@ -37,6 +37,7 @@ import { MessageActions } from "./message-actions";
 import { MessageComposer } from "./message-composer";
 import { TemplatePicker } from "./template-picker";
 import { buildReplyPreview } from "./reply-quote";
+import { RealtimeStatusDot } from "./realtime-status-dot";
 import { toast } from "sonner";
 
 interface ReplyDraft {
@@ -94,6 +95,8 @@ interface MessageThreadProps {
    * working; the button is only rendered when this is provided.
    */
   onRefresh?: () => void;
+  /** Live websocket state, surfaced as a status dot in the header. */
+  isRealtimeConnected?: boolean;
 }
 
 function formatDateSeparator(dateStr: string): string {
@@ -151,6 +154,7 @@ export function MessageThread({
   onBack,
   resyncToken = 0,
   onRefresh,
+  isRealtimeConnected = false,
 }: MessageThreadProps) {
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
@@ -814,6 +818,7 @@ export function MessageThread({
         </div>
 
         <div className="flex items-center gap-2">
+          <RealtimeStatusDot connected={isRealtimeConnected} compact className="mr-0.5" />
           {botPausedActive && (
             <button
               type="button"

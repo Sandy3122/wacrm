@@ -85,9 +85,27 @@ export async function ensureRealtimeAuth(): Promise<void> {
   if (typeof window === 'undefined') return
   const client = createClient()
   if (!client.auth) return
-  const {
+
+  let {
     data: { session },
   } = await client.auth.getSession()
+
+  // `getSession()` returns whatever is in storage and does NOT reliably
+  // refresh — so the access_token it hands back can already be expired
+  // (background tab, machine sleep, a missed auto-refresh tick). Pushing
+  // an expired JWT to the socket makes Realtime reject the join with
+  // CHANNEL_ERROR, and because the retry calls back through here and gets
+  // the SAME stale token, the channel stays stuck "Connecting…" forever.
+  // Force a refresh when the token is expired or within 60s of it.
+  const expiresAt = session?.expires_at // unix seconds
+  const nowSec = Math.floor(Date.now() / 1000)
+  if (session && (!expiresAt || expiresAt - nowSec < 60)) {
+    const { data, error } = await client.auth.refreshSession()
+    if (!error && data.session) {
+      session = data.session
+    }
+  }
+
   if (session?.access_token) {
     await client.realtime.setAuth(session.access_token)
   }

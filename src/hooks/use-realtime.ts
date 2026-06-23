@@ -56,7 +56,15 @@ export function useRealtime({
       // session is restored stays silently dead for the session (see
       // ensureRealtimeAuth). REST queries keep working, which is why a
       // manual refetch surfaces messages realtime appeared to "miss".
-      await ensureRealtimeAuth();
+      //
+      // Wrapped so an auth hiccup can't abort the async fn before the
+      // channel is even created (which would leave the dot stuck on amber
+      // with no retry, since the retry lives in the subscribe callback).
+      try {
+        await ensureRealtimeAuth();
+      } catch (e) {
+        console.warn(`[realtime] ${channelName} ensureRealtimeAuth failed:`, e);
+      }
       if (cancelled) return;
 
       channel = supabase
@@ -86,6 +94,12 @@ export function useRealtime({
           }
         )
         .subscribe((status, err) => {
+          // Temporary diagnostic — logs every transition so a stuck
+          // "Connecting…" dot can be traced to its exact cause.
+          console.info(
+            `[realtime] ${channelName} → ${status}`,
+            err ? (err.message ?? err) : "",
+          );
           if (status === "SUBSCRIBED") {
             attempt = 0;
             setIsConnected(true);

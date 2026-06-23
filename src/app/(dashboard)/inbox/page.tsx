@@ -18,6 +18,21 @@ import { toast } from "sonner";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+/**
+ * Newest-activity-first ordering for the conversation list — same order
+ * the initial fetch uses (`.order("last_message_at", desc)`). Applied
+ * after realtime updates so a conversation that just received a message
+ * bubbles to the top instead of staying frozen in its load-time slot
+ * (which made new messages look like they never arrived).
+ */
+function sortByRecent(list: Conversation[]): Conversation[] {
+  return [...list].sort(
+    (a, b) =>
+      new Date(b.last_message_at ?? 0).getTime() -
+      new Date(a.last_message_at ?? 0).getTime(),
+  );
+}
+
 export default function InboxPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -181,18 +196,20 @@ export default function InboxPage() {
         // always read false here.
         if (knownConvIdsRef.current.has(newMsg.conversation_id)) {
           setConversations((prev) =>
-            prev.map((c) =>
-              c.id === newMsg.conversation_id
-                ? {
-                    ...c,
-                    last_message_text: newMsg.content_text ?? "",
-                    last_message_at: newMsg.created_at,
-                    unread_count:
-                      activeConversation?.id === newMsg.conversation_id
-                        ? 0
-                        : c.unread_count + 1,
-                  }
-                : c,
+            sortByRecent(
+              prev.map((c) =>
+                c.id === newMsg.conversation_id
+                  ? {
+                      ...c,
+                      last_message_text: newMsg.content_text ?? "",
+                      last_message_at: newMsg.created_at,
+                      unread_count:
+                        activeConversation?.id === newMsg.conversation_id
+                          ? 0
+                          : c.unread_count + 1,
+                    }
+                  : c,
+              ),
             ),
           );
         } else {
@@ -248,14 +265,16 @@ export default function InboxPage() {
           // UPDATE to round-trip. Non-active convs take the value as-is.
           const isActive = activeConversation?.id === conv.id;
           setConversations((prev) =>
-            prev.map((c) =>
-              c.id === conv.id
-                ? {
-                    ...c,
-                    ...conv,
-                    unread_count: isActive ? 0 : conv.unread_count,
-                  }
-                : c,
+            sortByRecent(
+              prev.map((c) =>
+                c.id === conv.id
+                  ? {
+                      ...c,
+                      ...conv,
+                      unread_count: isActive ? 0 : conv.unread_count,
+                    }
+                  : c,
+              ),
             ),
           );
         } else {
@@ -268,6 +287,29 @@ export default function InboxPage() {
 
         // Update active conversation if it changed
         if (activeConversation && conv.id === activeConversation.id) {
+          // Fallback for a dropped messages-table realtime event. The
+          // webhook bumps `last_message_at` on every inbound message, and
+          // the conversations UPDATE (simple owner RLS) is far more
+          // reliable than the messages INSERT (which rides a subquery RLS
+          // policy). If the active thread's conversation now shows a newer
+          // customer message than we've rendered, force a thread refetch so
+          // the bubble appears immediately even when its own INSERT event
+          // never arrived — the symptom where messages only surfaced after
+          // an unrelated state change (e.g. the bot toggle).
+          //
+          // Gated on a strictly-newer timestamp AND a customer source so
+          // the unread-count reset (which leaves last_message_at untouched)
+          // can't loop, and the agent's own optimistic sends — handled by
+          // their own INSERT event — don't trigger a disruptive refetch.
+          const prevAt = activeConversation.last_message_at;
+          const nextAt = conv.last_message_at;
+          const isNewerInbound =
+            conv.last_message_source === "customer" &&
+            !!nextAt &&
+            (!prevAt || new Date(nextAt).getTime() > new Date(prevAt).getTime());
+          if (isNewerInbound) {
+            setResyncToken((n) => n + 1);
+          }
           setActiveConversation((prev) =>
             prev ? { ...prev, ...conv } : prev
           );
@@ -549,6 +591,7 @@ export default function InboxPage() {
             conversations={conversations}
             onConversationsLoaded={handleConversationsLoaded}
             resyncToken={resyncToken}
+            isRealtimeConnected={isConnected}
           />
         </div>
 
@@ -575,6 +618,7 @@ export default function InboxPage() {
             onBack={handleCloseConversation}
             resyncToken={resyncToken}
             onRefresh={handleManualRefresh}
+            isRealtimeConnected={isConnected}
           />
         </div>
 
