@@ -1,13 +1,25 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { getSupabasePublicEnv } from '@/lib/supabase/env'
 
 export async function middleware(request: NextRequest) {
+  const env = getSupabasePublicEnv()
+  if (!env) {
+    return NextResponse.json(
+      {
+        error:
+          'Server misconfiguration: set NEXT_PUBLIC_SUPABASE_URL and ' +
+          'NEXT_PUBLIC_SUPABASE_ANON_KEY.',
+      },
+      { status: 500 },
+    )
+  }
+
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-      || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
+    env.url,
+    env.key,
     {
       cookies: {
         getAll() {
