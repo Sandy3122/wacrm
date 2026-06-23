@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { createClient, ensureRealtimeAuth } from "@/lib/supabase/client";
 import type { Message, Conversation } from "@/types";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
@@ -43,39 +43,88 @@ export function useRealtime({
     if (!enabled) return;
 
     const supabase = createClient();
+    let channel: RealtimeChannel | null = null;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
 
-    const channel = supabase
-      .channel(channelName)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "messages" },
-        (payload) => {
-          onMessageRef.current?.({
-            eventType: payload.eventType as RealtimeEvent<Message>["eventType"],
-            new: payload.new as Message,
-            old: payload.old as Partial<Message>,
-          });
-        }
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "conversations" },
-        (payload) => {
-          onConversationRef.current?.({
-            eventType: payload.eventType as RealtimeEvent<Conversation>["eventType"],
-            new: payload.new as Conversation,
-            old: payload.old as Partial<Conversation>,
-          });
-        }
-      )
-      .subscribe((status) => {
-        setIsConnected(status === "SUBSCRIBED");
-      });
+    const subscribe = async () => {
+      if (cancelled) return;
 
-    channelRef.current = channel;
+      // Authenticate the socket BEFORE joining — postgres_changes enforces
+      // RLS using the websocket's JWT, and a channel that joins before the
+      // session is restored stays silently dead for the session (see
+      // ensureRealtimeAuth). REST queries keep working, which is why a
+      // manual refetch surfaces messages realtime appeared to "miss".
+      await ensureRealtimeAuth();
+      if (cancelled) return;
+
+      channel = supabase
+        .channel(channelName)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "messages" },
+          (payload) => {
+            onMessageRef.current?.({
+              eventType:
+                payload.eventType as RealtimeEvent<Message>["eventType"],
+              new: payload.new as Message,
+              old: payload.old as Partial<Message>,
+            });
+          }
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "conversations" },
+          (payload) => {
+            onConversationRef.current?.({
+              eventType:
+                payload.eventType as RealtimeEvent<Conversation>["eventType"],
+              new: payload.new as Conversation,
+              old: payload.old as Partial<Conversation>,
+            });
+          }
+        )
+        .subscribe((status, err) => {
+          if (status === "SUBSCRIBED") {
+            attempt = 0;
+            setIsConnected(true);
+            return;
+          }
+
+          setIsConnected(false);
+
+          // CHANNEL_ERROR / TIMED_OUT — usually an auth/RLS rejection or a
+          // transient socket drop. Tear down and rebuild with a fresh token
+          // (backoff capped at 15s) so a cold-start race or expired token
+          // doesn't leave the inbox stuck on stale data until a reload.
+          // CLOSED fires on normal teardown too, so it's excluded from retry.
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            if (err) {
+              console.warn(
+                `[realtime] ${channelName} ${status}:`,
+                err.message ?? err
+              );
+            }
+            if (channel) {
+              supabase.removeChannel(channel);
+              channel = null;
+            }
+            const delay = Math.min(1000 * 2 ** attempt, 15000);
+            attempt += 1;
+            retryTimer = setTimeout(subscribe, delay);
+          }
+        });
+
+      channelRef.current = channel;
+    };
+
+    void subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (channel) supabase.removeChannel(channel);
       channelRef.current = null;
       setIsConnected(false);
     };

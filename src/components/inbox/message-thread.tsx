@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { createClient, ensureRealtimeAuth } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
 import { cn } from "@/lib/utils";
 import type {
@@ -322,8 +322,16 @@ export function MessageThread({
   useEffect(() => {
     if (!conversationId) return;
     const supabase = createClient();
+    let cancelled = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
 
-    const channel = supabase
+    void (async () => {
+      // Authenticate the socket before joining so RLS on postgres_changes
+      // doesn't silently drop reaction events (see ensureRealtimeAuth).
+      await ensureRealtimeAuth();
+      if (cancelled) return;
+
+      channel = supabase
       .channel(`reactions:${conversationId}`)
       .on(
         "postgres_changes",
@@ -383,9 +391,11 @@ export function MessageThread({
         },
       )
       .subscribe();
+    })();
 
     return () => {
-      supabase.removeChannel(channel);
+      cancelled = true;
+      if (channel) supabase.removeChannel(channel);
     };
   }, [conversationId]);
 
